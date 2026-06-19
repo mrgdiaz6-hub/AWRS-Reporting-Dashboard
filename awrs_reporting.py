@@ -300,22 +300,33 @@ def is_mobile_job(job):
     cat = get_job_category(job).lower()
     return "mobile" in cat or "mrf" in cat
 
+PAGE_SIZE      = 100   # smaller payload per page → faster per-request response
+MAX_SCAN_SECS  = 120   # hard time budget for the entire scan
+
 def fetch_jobs_for_period(start_date: str, end_date: str):
     """Fetch Zuper jobs for date range.
     Zuper /jobs/filter returns jobs newest-first (confirmed by debug).
     filter_rules don't filter server-side, so we do early termination:
     stop as soon as max(date) in a page < start_date — all subsequent pages are older.
     """
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt   = datetime.strptime(end_date,   "%Y-%m-%d")
-    jobs = []
-    for page in range(1, 61):
+    start_dt  = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt    = datetime.strptime(end_date,   "%Y-%m-%d")
+    jobs      = []
+    t0        = time.time()
+    for page in range(1, 81):
+        elapsed = time.time() - t0
+        if elapsed > MAX_SCAN_SECS:
+            print(f"[jobs] time limit reached at p{page} ({elapsed:.0f}s), returning {len(jobs)} jobs", flush=True)
+            break
+        print(f"[jobs] fetching p{page} ({elapsed:.0f}s)…", flush=True)
         try:
-            resp  = zuper_post("/jobs/filter", {"limit": 200, "page": page, "filter_rules": []}, timeout=20)
+            resp  = zuper_post("/jobs/filter", {"limit": PAGE_SIZE, "page": page, "filter_rules": []}, timeout=20)
             batch = resp.get("data") or []
-            if not batch: break
+            if not batch:
+                print(f"[jobs] p{page} empty — done", flush=True)
+                break
             in_range = []
-            max_date  = None  # newest date seen on this page
+            max_date  = None
             for job in batch:
                 jd_str = get_job_date(job)
                 if not jd_str: continue
@@ -328,15 +339,17 @@ def fetch_jobs_for_period(start_date: str, end_date: str):
                 except ValueError:
                     pass
             jobs.extend(in_range)
-            if len(batch) < 200: break
-            # Zuper is newest-first: if max date on this page is before our window, stop
+            print(f"[jobs] p{page}: {len(batch)} returned, {len(in_range)} in range, max={max_date}", flush=True)
+            if len(batch) < PAGE_SIZE: break
+            # Zuper newest-first: once max date falls below start, we're past our window
             if max_date is not None and max_date < start_dt:
                 print(f"[jobs] early stop p{page}: max={max_date.date()} < {start_date}", flush=True)
                 break
         except Exception as e:
-            print(f"[jobs] p{page} {e}", flush=True)
+            print(f"[jobs] p{page} error: {e}", flush=True)
             break
-    print(f"[jobs] {start_date}→{end_date}: {len(jobs)} jobs", flush=True)
+    total = time.time() - t0
+    print(f"[jobs] {start_date}→{end_date}: {len(jobs)} jobs in {total:.0f}s", flush=True)
     return jobs
 
 # ── Azuga helpers ─────────────────────────────────────────
@@ -1588,7 +1601,7 @@ def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"AWRS Reporting Dashboard → http://localhost:{PORT}", flush=True)
     # Pre-warm production cache in the background so first page load is instant
-    threading.Thread(target=_prewarm_production, daemon=False, name="prewarm").start()
+    threading.Thread(target=_prewarm_production, daemon=True, name="prewarm").start()
     if IS_LOCAL:
         import webbrowser
         threading.Timer(0.8, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
