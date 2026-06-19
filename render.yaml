@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: awrs-reporting-dashboard
+    runtime: python
+    buildCommand: echo "No build step needed"
+    startCommand: python awrs_reporting.py
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: ZUPER_API_KEY
+        value: 05a82304b0074c2c9b32f7ca2a1ab682
+      - key: WHEEL_TARGET
+        value: "500"
+      - key: OT_THRESHOLD
+        value: "40"
+      - key: AUTH_SECRET
+        generateValue: true
+      # Add these when credentials are ready:
+      # - key: AZUGA_USERNAME
+      #   value: your_azuga_email
+      # - key: AZUGA_PASSWORD
+      #   value: your_azuga_password
+      # - key: PAYLOCITY_CLIENT_ID
+      #   value: your_paylocity_client_id
+      # - key: PAYLOCITY_CLIENT_SECRET
+      #   value: your_paylocity_secret
+      # - key: PAYLOCITY_COMPANY_ID
+      #   value: your_company_id
