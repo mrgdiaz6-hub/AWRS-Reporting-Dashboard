@@ -222,42 +222,55 @@ def azuga_token():
         return None
 
 def azuga_trips(day_str):
+    """Fetch all Azuga trips for day_str (YYYY-MM-DD). Matches dispatcher format exactly."""
     tok = azuga_token()
     if not tok: return None
-    rows, index = [], 1
-    while True:
+    # Use ISO timestamps ~midnight→midnight EDT (same as dispatcher)
+    d0    = datetime.strptime(day_str, "%Y-%m-%d")
+    start = d0.strftime("%Y-%m-%dT04:00:00.000Z")
+    end   = (d0 + timedelta(days=1)).strftime("%Y-%m-%dT06:00:00.000Z")
+    rows, seen, index = [], set(), 0
+    while index < 60:
+        body = json.dumps({
+            "index": index, "size": 200, "desc": False,
+            "browserTimezone": "America/New_York",
+            "sortField": "tsTimeVehicleTimezone",
+            "filter": {"orFilter": {"vehicleId": []}, "matchFilter": {}},
+            "startDate": start, "endDate": end
+        }).encode()
+        req = urllib.request.Request(
+            "https://services.azuga.com/reports/v3/reports/trip", data=body,
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}, method="POST")
         try:
-            body = json.dumps({"reportType":"TRIP","startDate":day_str,"endDate":day_str,
-                               "pageIndex":index,"pageSize":500}).encode()
-            req = urllib.request.Request(
-                "https://services.azuga.com/reports/v3/reports/trip", data=body,
-                headers={"Authorization":f"Bearer {tok}","Content-Type":"application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=60) as r:
                 data = json.loads(r.read())
-            batch = data.get("data") or data.get("tripReport") or []
-            if not batch: break
-            rows.extend(batch)
-            if len(batch) < 500: break
-            index += 1
         except Exception as e:
-            print(f"[azuga] trips p{index}: {e}", flush=True)
+            print(f"[azuga] trips idx {index}: {e}", flush=True)
             break
+        chunk = (data.get("data") or {}).get("result") or []
+        new   = [t for t in chunk if t.get("id") not in seen]
+        for t in new: seen.add(t.get("id"))
+        rows.extend(new)
+        if len(chunk) < 200 or not new: break
+        index += 1
+    print(f"[azuga] {day_str}: {len(rows)} trips", flush=True)
     return rows
 
-def azuga_vehicles():
-    """Fetch vehicle list for fleet count."""
-    tok = azuga_token()
-    if not tok: return []
-    try:
-        req = urllib.request.Request(
-            "https://services.azuga.com/reports/v3/vehicle/list",
-            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read())
-        return data.get("data") or data.get("vehicles") or []
-    except Exception as e:
-        print(f"[azuga] vehicles: {e}", flush=True)
-        return []
+def _trip_miles(t):
+    return float(t.get("tripDistance") or t.get("distance") or t.get("totalDistance") or 0)
+
+def _trip_hours(t):
+    # tripTime is seconds in dispatcher; also try minutes fallback
+    raw = t.get("tripTime") or t.get("duration") or t.get("tripDuration") or 0
+    secs = float(raw)
+    # If suspiciously small it's probably minutes not seconds
+    return secs / 3600.0 if secs > 300 else secs / 60.0
+
+def _trip_driver(t):
+    return str(t.get("driver") or t.get("fullName") or t.get("driverName") or "Unknown").strip()
+
+def _trip_vehicle(t):
+    return str(t.get("vehicleId") or t.get("vehicle_id") or t.get("vehicleName") or "").strip()
 
 # ── Paylocity stub ────────────────────────────────────────
 def paylocity_available():
@@ -538,16 +551,20 @@ class Handler(BaseHTTPRequestHandler):
             daily = {}
             for d in days:
                 trips = azuga_trips(d) or []
-                miles = sum(float(t.get("distance") or t.get("totalDistance") or 0) for t in trips)
-                hrs   = sum(float(t.get("duration")  or t.get("tripDuration")  or 0) for t in trips) / 60.0
-                vehs  = len({t.get("vehicleId") or t.get("vehicle_id") or "" for t in trips if t.get("vehicleId") or t.get("vehicle_id")})
+                miles = sum(_trip_miles(t) for t in trips)
+                hrs   = sum(_trip_hours(t) for t in trips)
+                vehs  = len({_trip_vehicle(t) for t in trips if _trip_vehicle(t)})
                 drivers = {}
                 for t in trips:
-                    drv = str(t.get("driver") or t.get("driverName") or "Unknown")
+                    drv = _trip_driver(t)
                     if drv not in drivers: drivers[drv] = {"trips":0,"miles":0.0,"hours":0.0}
                     drivers[drv]["trips"] += 1
-                    drivers[drv]["miles"] += float(t.get("distance") or 0)
-                    drivers[drv]["hours"] += float(t.get("duration")  or 0) / 60.0
+                    drivers[drv]["miles"] += _trip_miles(t)
+                    drivers[drv]["hours"] += _trip_hours(t)
+                # round driver values
+                for drv in drivers:
+                    drivers[drv]["miles"] = round(drivers[drv]["miles"], 1)
+                    drivers[drv]["hours"] = round(drivers[drv]["hours"], 2)
                 daily[d] = {"trips": len(trips), "miles": round(miles,1), "hours": round(hrs,1), "vehicles": vehs, "drivers": drivers}
             totals = {
                 "trips":    sum(v["trips"]    for v in daily.values()),
