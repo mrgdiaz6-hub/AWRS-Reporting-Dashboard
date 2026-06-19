@@ -115,7 +115,7 @@ def count_wheels_from_line_items(line_items):
     return mobile, reman, nr
 
 # ── Auth ──────────────────────────────────────────────────
-AUTH_SECRET   = os.environ.get("AUTH_SECRET") or uuid.uuid4().hex
+AUTH_SECRET   = os.environ.get("AUTH_SECRET") or hashlib.sha256(f"awrs-{ZUPER_KEY}".encode()).hexdigest()[:32]
 ALLOWED_EMAIL = re.compile(r"^[A-Za-z0-9._%+-]+@alloywheel\.com$", re.I)
 AUTH_TTL      = 30 * 86400
 
