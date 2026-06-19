@@ -153,6 +153,8 @@ def zuper_post(path, body, timeout=20):
 
 _cache = {}
 _cache_lock = threading.Lock()
+_warming = set()
+_warming_lock = threading.Lock()
 
 def cache_get(key):
     with _cache_lock:
@@ -779,21 +781,34 @@ class Handler(BaseHTTPRequestHandler):
         key    = f"prod_{start}_{end}_{loc}"
         c      = cache_get(key)
         if c: self.send_json(c); return
+        # Cache miss — kick off background fetch and return 202 immediately
+        # (Zuper job scan takes 30-90s; Render's request timeout is 30s)
+        with _warming_lock:
+            already = key in _warming
+            if not already:
+                _warming.add(key)
+        if not already:
+            threading.Thread(target=self._warm_production,
+                             args=(key, start, end, loc), daemon=True).start()
+        self.send_json({"status": "loading"}, 202)
+
+    def _warm_production(self, key, start, end, loc):
         try:
             jobs = fetch_jobs_for_period(start, end)
             kpis = compute_production_kpis(jobs, start, end, team_uid=loc)
-            # Hydrate employee names + emp_code (cross-system key)
             emp_map = build_employee_map()
             for e in kpis["employees"]:
                 rec = emp_map["by_uid"].get(e["uid"], {})
-                if rec.get("name"):      e["name"]        = rec["name"]
-                if rec.get("emp_code"):  e["emp_code"]    = rec["emp_code"]
+                if rec.get("name"):        e["name"]        = rec["name"]
+                if rec.get("emp_code"):    e["emp_code"]    = rec["emp_code"]
                 if rec.get("designation"): e["designation"] = rec["designation"]
             cache_set(key, kpis, 90)
-            self.send_json(kpis)
+            print(f"[production warm] {key} ready", flush=True)
         except Exception as e:
-            print(f"[production] {e}", flush=True)
-            self.send_json({"error": str(e)}, 500)
+            print(f"[production warm] {key} error: {e}", flush=True)
+        finally:
+            with _warming_lock:
+                _warming.discard(key)
 
     def api_fleet(self, params):
         start = params.get("start") or date.today().strftime("%Y-%m-%d")
@@ -1164,12 +1179,22 @@ async function loadAll(){
 }
 
 // ── Production ─────────────────────────────────────────────
+let _prodPollTimer=null;
 async function loadProduction(){
+  if(_prodPollTimer){clearTimeout(_prodPollTimer);_prodPollTimer=null;}
   setEl('prod-kpis','<div class="loading"><span class="sp"></span>Loading…</div>');
   setEl('prod-table','<div class="loading"><span class="sp"></span>Loading…</div>');
   const loc=document.getElementById('locationPicker').value;
   try{
-    PROD=await apiFetch(`/api/production?start=${RANGE.start}&end=${RANGE.end}&location=${loc}`);
+    const url=`/api/production?start=${RANGE.start}&end=${RANGE.end}&location=${loc}`;
+    let data=await apiFetch(url);
+    // Server returns 202 + {status:"loading"} while Zuper job scan runs in background
+    if(data && data.status==='loading'){
+      setEl('prod-kpis','<div class="loading"><span class="sp"></span>Scanning jobs… (this takes ~30–60s on first load)</div>');
+      _prodPollTimer=setTimeout(loadProduction, 6000);
+      return;
+    }
+    PROD=data;
     renderProdKPIs(PROD);
     renderWheelsChart(PROD);
     renderWTDChart(PROD);
@@ -1498,6 +1523,7 @@ function switchTab(name, el){
 async function apiFetch(url){
   const r=await fetch(url);
   if(r.status===401){location.reload();throw new Error('Session expired');}
+  if(r.status===202){return r.json();} // loading/warming — caller handles
   if(!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
