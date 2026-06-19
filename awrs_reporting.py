@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AWRS Reporting Dashboard — v2026-06-19d
+AWRS Reporting Dashboard — v2026-06-19e
 ────────────────────────────────────────
 Blended KPI dashboard: Zuper (production/techs) + Azuga (fleet/drivers) + Paylocity (labor/admin)
 
@@ -347,8 +347,28 @@ def is_mobile_job(job):
 PAGE_SIZE      = 100   # smaller payload per page → faster per-request response
 MAX_SCAN_SECS  = 300   # hard time budget for the entire scan (5 min; month needs ~150 pages)
 
+def slim_job(job):
+    """Extract only the fields needed for KPI computation.
+    Reduces each job from ~20 KB (full Zuper JSON) to ~700 bytes,
+    preventing OOM on Render's 512 MB free tier during month-level scans.
+    Pre-computes derived fields so compute_production_kpis runs faster too.
+    """
+    prods = job.get("products") or []
+    return {
+        "_date":     get_job_date(job),
+        "_status":   get_job_status(job).lower(),
+        "_type":     get_job_type(job),
+        "_uids":     sorted(get_job_assigned_uids(job)),
+        "_team_uid": get_job_team_uid(job),
+        "_dur":      get_job_duration_hours(job),
+        "products":  [{"product_id":   p.get("product_id"),
+                       "product_name": p.get("product_name"),
+                       "quantity":     p.get("quantity")}
+                      for p in prods],
+    }
+
 def fetch_jobs_for_period(start_date: str, end_date: str):
-    """Fetch Zuper jobs for date range.
+    """Fetch Zuper jobs for date range, returning slimmed job dicts.
     Zuper /jobs/filter returns jobs newest-first (confirmed by debug).
     filter_rules don't filter server-side, so we do early termination:
     stop as soon as max(date) in a page < start_date — all subsequent pages are older.
@@ -377,7 +397,7 @@ def fetch_jobs_for_period(start_date: str, end_date: str):
                 try:
                     jd = datetime.strptime(jd_str, "%Y-%m-%d")
                     if start_dt <= jd <= end_dt:
-                        in_range.append(job)
+                        in_range.append(slim_job(job))   # store slimmed, discard full blob
                     if max_date is None or jd > max_date:
                         max_date = jd
                 except ValueError:
@@ -507,11 +527,12 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
     workdays = workdays_in_range(start_date, end_date)
     day_set  = set(workdays)
 
+    # Jobs are slimmed dicts with pre-computed _date, _status, _type, _uids, _team_uid, _dur
     if team_uid and team_uid != "all":
-        jobs = [j for j in jobs if get_job_team_uid(j) == team_uid]
+        jobs = [j for j in jobs if j.get("_team_uid") == team_uid]
 
-    completed = [j for j in jobs if get_job_status(j).lower() in COMPLETED_STATUSES]
-    in_period = [j for j in jobs if get_job_date(j) in day_set]
+    completed = [j for j in jobs if j.get("_status","") in COMPLETED_STATUSES]
+    in_period = [j for j in jobs if j.get("_date","") in day_set]
 
     # Daily production
     daily_wheels   = {d: 0 for d in workdays}
@@ -524,24 +545,23 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
     daily_nr = {d: 0 for d in workdays}
 
     for job in in_period:
-        d = get_job_date(job)
+        d = job.get("_date","")
         if d not in day_set: continue
-        status   = get_job_status(job).lower()
-        jtype    = get_job_type(job)         # mobile / reman / nr / other
+        status   = job.get("_status","")     # already lowercased in slim_job
+        jtype    = job.get("_type","")
         products = job.get("products") or []
         mob, rem, nr_cnt = count_wheels_from_products(products, job_type=jtype)
         job_wheels = mob + rem
         # Count wheels if job has products (products present = work was performed)
-        # OR if status explicitly shows completion. This handles cases where status
-        # field name varies across Zuper API versions.
+        # OR if status explicitly shows completion.
         count_wheels = job_wheels > 0 or (status and status in COMPLETED_STATUSES)
         if count_wheels:
             daily_wheels[d] += job_wheels
             daily_mobile[d] += mob
             daily_reman[d]  += rem
             daily_nr[d]     += nr_cnt
-        assigned = get_job_assigned_uids(job)
-        dur = get_job_duration_hours(job)
+        assigned = job.get("_uids") or []
+        dur = job.get("_dur", 1.0)
         for uid in assigned:
             tech_days.add((uid, d))
             if uid not in employee_hours:
@@ -1701,22 +1721,15 @@ def _do_prewarm(label, start, end):
             _warming.discard(key)
 
 def _prewarm_production():
-    """Pre-warm this-week AND this-month production caches on startup (sequentially).
-    Runs in a background thread so the server starts immediately.
+    """Pre-warm this-week production cache on startup.
+    Month data warms lazily on first user request (slim_job keeps it well under 512 MB).
+    Runs in a daemon thread so the server starts immediately.
     """
     today = date.today()
     mon   = today - timedelta(days=today.weekday())
-
-    # ── This Week ──────────────────────────────────────────
     w_start = mon.strftime("%Y-%m-%d")
     w_end   = min(mon + timedelta(days=4), today).strftime("%Y-%m-%d")
     _do_prewarm("week", w_start, w_end)
-
-    # ── This Month ─────────────────────────────────────────
-    m_start = date(today.year, today.month, 1).strftime("%Y-%m-%d")
-    m_end   = today.strftime("%Y-%m-%d")
-    if m_start != w_start or m_end != w_end:   # skip if same as week (e.g. first Mon of month)
-        _do_prewarm("month", m_start, m_end)
 
 # ── Server ────────────────────────────────────────────────
 def main():
