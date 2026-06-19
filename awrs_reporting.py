@@ -213,7 +213,8 @@ def azuga_token():
             "https://auth.azuga.com/azuga-as/oauth2/login/oauthtoken.json?loginType=1",
             data=body, headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=15) as r:
-            tok = json.loads(r.read()).get("access_token")
+            d = json.loads(r.read())
+        tok = (d.get("data") or {}).get("access_token")
         with _azuga["lock"]:
             _azuga["token"], _azuga["ts"] = tok, time.time()
         return tok
