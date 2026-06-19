@@ -487,6 +487,36 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"keys": list(sample.keys()), "sample": sample})
             except Exception as e:
                 self.send_json({"error": str(e)})
+        elif path == "/api/debug_azuga":
+            # Tests Azuga auth + one day of trips; returns raw data for debugging
+            day = params.get("day") or (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+            result = {"azuga_user_set": bool(AZUGA_USER), "day": day}
+            try:
+                tok = azuga_token()
+                result["token_obtained"] = bool(tok)
+                if tok:
+                    d0    = datetime.strptime(day, "%Y-%m-%d")
+                    start = d0.strftime("%Y-%m-%dT04:00:00.000Z")
+                    end   = (d0 + timedelta(days=1)).strftime("%Y-%m-%dT06:00:00.000Z")
+                    body  = json.dumps({"index": 0, "size": 5, "desc": False,
+                                        "browserTimezone": "America/New_York",
+                                        "sortField": "tsTimeVehicleTimezone",
+                                        "filter": {"orFilter": {"vehicleId": []}, "matchFilter": {}},
+                                        "startDate": start, "endDate": end}).encode()
+                    req = urllib.request.Request(
+                        "https://services.azuga.com/reports/v3/reports/trip", data=body,
+                        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        raw = json.loads(r.read())
+                    result["raw_response_keys"] = list(raw.keys()) if isinstance(raw, dict) else str(type(raw))
+                    result["data_keys"] = list((raw.get("data") or {}).keys()) if isinstance(raw.get("data"), dict) else str(raw.get("data"))
+                    chunk = (raw.get("data") or {}).get("result") or []
+                    result["trip_count_sample"] = len(chunk)
+                    result["first_trip_keys"] = list(chunk[0].keys()) if chunk else []
+                    result["first_trip"] = chunk[0] if chunk else None
+            except Exception as e:
+                result["error"] = str(e)
+            self.send_json(result)
         else: self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
