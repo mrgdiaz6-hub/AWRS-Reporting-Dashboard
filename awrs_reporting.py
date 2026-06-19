@@ -131,6 +131,47 @@ def fetch_users():
     cache_set("users", users, 300)
     return users
 
+def build_employee_map():
+    """Build cross-system employee lookup.
+    Keys: normalized full name (lower), user_uid, emp_code (if numeric).
+    Value: {user_uid, emp_code, name, designation, email, team_uid}
+    emp_code in Zuper = Employee ID in Azuga = Employee # in Paylocity.
+    Azuga→Zuper join: fullName (lower) → emp_code.
+    """
+    c = cache_get("emp_map")
+    if c: return c
+    users = fetch_users()
+    by_name = {}  # normalized full name → record
+    by_uid  = {}  # user_uid → record
+    by_emp  = {}  # emp_code (numeric str) → record
+    for u in users:
+        if u.get("is_deleted"): continue
+        uid   = u.get("user_uid") or ""
+        fname = (u.get("first_name") or "").strip()
+        lname = (u.get("last_name")  or "").strip()
+        name  = f"{fname} {lname}".strip()
+        emp   = str(u.get("emp_code") or "").strip()
+        rec = {
+            "user_uid":    uid,
+            "emp_code":    emp,
+            "name":        name,
+            "designation": u.get("designation") or "",
+            "email":       u.get("email") or "",
+            "hourly_rate": u.get("hourly_labor_charge"),
+        }
+        if name: by_name[name.lower()] = rec
+        if uid:  by_uid[uid]           = rec
+        if emp and emp.isdigit(): by_emp[emp] = rec
+    result = {"by_name": by_name, "by_uid": by_uid, "by_emp": by_emp}
+    cache_set("emp_map", result, 300)
+    return result
+
+def emp_lookup_by_name(full_name, emp_map=None):
+    """Lookup employee record by Azuga fullName. Returns rec or {}."""
+    if not full_name: return {}
+    if emp_map is None: emp_map = build_employee_map()
+    return emp_map["by_name"].get(full_name.strip().lower(), {})
+
 def get_job_status(job):
     cs = job.get("current_status") or {}
     if isinstance(cs, dict):
@@ -600,12 +641,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             jobs = fetch_jobs_for_period(start, end)
             kpis = compute_production_kpis(jobs, start, end, team_uid=loc)
-            # Hydrate employee names
-            users = cache_get("users") or fetch_users()
-            uid_to = {u.get("user_uid") or u.get("uid",""): f"{u.get('first_name','')} {u.get('last_name','')}".strip() for u in users}
+            # Hydrate employee names + emp_code (cross-system key)
+            emp_map = build_employee_map()
             for e in kpis["employees"]:
-                if uid_to.get(e["uid"]):
-                    e["name"] = uid_to[e["uid"]]
+                rec = emp_map["by_uid"].get(e["uid"], {})
+                if rec.get("name"):      e["name"]        = rec["name"]
+                if rec.get("emp_code"):  e["emp_code"]    = rec["emp_code"]
+                if rec.get("designation"): e["designation"] = rec["designation"]
             cache_set(key, kpis, 90)
             self.send_json(kpis)
         except Exception as e:
@@ -621,8 +663,11 @@ class Handler(BaseHTTPRequestHandler):
         if not (AZUGA_USER and AZUGA_PASS):
             self.send_json({"stub": True, "message": "Set AZUGA_USERNAME and AZUGA_PASSWORD in Render environment."}); return
         try:
+            emp_map = build_employee_map()
             days = workdays_in_range(start, end)
             daily = {}
+            # Accumulate per-driver totals across all days for rollup
+            driver_totals = {}  # name → {trips, miles, hours, emp_code, designation}
             for d in days:
                 trips = azuga_trips(d) or []
                 miles = sum(_trip_miles(t) for t in trips)
@@ -631,22 +676,42 @@ class Handler(BaseHTTPRequestHandler):
                 drivers = {}
                 for t in trips:
                     drv = _trip_driver(t)
-                    if drv not in drivers: drivers[drv] = {"trips":0,"miles":0.0,"hours":0.0}
+                    if not drv: continue
+                    emp = emp_lookup_by_name(drv, emp_map)
+                    if drv not in drivers:
+                        drivers[drv] = {"trips":0,"miles":0.0,"hours":0.0,
+                                        "emp_code": emp.get("emp_code",""),
+                                        "designation": emp.get("designation","")}
                     drivers[drv]["trips"] += 1
                     drivers[drv]["miles"] += _trip_miles(t)
                     drivers[drv]["hours"] += _trip_hours(t)
+                    # accumulate into totals
+                    if drv not in driver_totals:
+                        driver_totals[drv] = {"trips":0,"miles":0.0,"hours":0.0,"days":0,
+                                              "emp_code": emp.get("emp_code",""),
+                                              "designation": emp.get("designation","")}
+                    driver_totals[drv]["trips"] += 1
+                    driver_totals[drv]["miles"] += _trip_miles(t)
+                    driver_totals[drv]["hours"] += _trip_hours(t)
+                # mark active days per driver
+                for drv in drivers:
+                    driver_totals[drv]["days"] = driver_totals[drv].get("days", 0) + 1
                 # round driver values
                 for drv in drivers:
                     drivers[drv]["miles"] = round(drivers[drv]["miles"], 1)
                     drivers[drv]["hours"] = round(drivers[drv]["hours"], 2)
                 daily[d] = {"trips": len(trips), "miles": round(miles,1), "hours": round(hrs,1), "vehicles": vehs, "drivers": drivers}
+            # round driver totals
+            for drv in driver_totals:
+                driver_totals[drv]["miles"] = round(driver_totals[drv]["miles"], 1)
+                driver_totals[drv]["hours"] = round(driver_totals[drv]["hours"], 2)
             totals = {
                 "trips":    sum(v["trips"]    for v in daily.values()),
                 "miles":    round(sum(v["miles"]    for v in daily.values()), 1),
                 "hours":    round(sum(v["hours"]    for v in daily.values()), 1),
                 "vehicles": max((v["vehicles"] for v in daily.values()), default=0),
             }
-            result = {"start": start, "end": end, "daily": daily, "totals": totals}
+            result = {"start": start, "end": end, "daily": daily, "totals": totals, "drivers": driver_totals}
             cache_set(key, result, 180)
             self.send_json(result)
         except Exception as e:
