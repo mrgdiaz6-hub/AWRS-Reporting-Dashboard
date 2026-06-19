@@ -44,6 +44,76 @@ MOBILE_ASP       = float(os.environ.get("MOBILE_ASP", 93.80))
 REMAN_ASP        = float(os.environ.get("REMAN_ASP", 141.95))
 IS_LOCAL         = not os.environ.get("RENDER")
 
+# ── Wheel Service Product IDs (NetSuite IDs from Zuper Product Report) ────
+# Each service exists across 5 categories: Local/Wholesale/Retail/Claims/REDO
+MOBILE_WHEEL_IDS = {
+    # Mobile Repair Custom
+    "199134","199230","199278","199182","199349",
+    # RQ1 Complete Finish
+    "204116","204117","204118","204119","204120",
+    # RQ2 Mobile Repair Combination
+    "200988","201006","200994","201000","204125",
+    # RQ2 Mobile Repair Hyper
+    "200986","201004","200992","200998","204127",
+    # RQ2 Mobile Repair Machined
+    "200987","201005","200993","200999","204126",
+    # RQ2 Mobile Repair Paint
+    "200989","201007","200995","201001","204124",
+    # RQ2 Mobile Repair Polish
+    "200990","201008","200996","201002","204123",
+    # RQ2 Mobile Repair Straighten
+    "200985","201003","200991","200997","204128",
+    # RQ3 Mobile Repair Combination
+    "199132","199228","199276","199180","199347",
+    # RQ3 Mobile Repair Hyper
+    "199131","199227","199275","199179","199346",
+    # RQ3 Mobile Repair Machined
+    "199130","199226","199274","199178","199345",
+    # RQ3 Mobile Repair Paint
+    "199129","199225","199273","199177","199344",
+    # RQ3 Mobile Repair Polish
+    "199133","199229","199277","199181","199348",
+    # RQ3 Mobile Repair Straighten
+    "199135","199231","199279","199183","199350",
+}
+REMAN_WHEEL_IDS = {
+    # Complete Wheel Remanufacturing
+    "199112","199208","199256","199160","199327",
+    # Structural Repair
+    "199111","199207","199255","199159","199326",
+}
+NR_WHEEL_IDS = {
+    # Non-Repairable Wheel (tracked separately as % of total repairs)
+    "199115","199211","199259","199163","199330",
+}
+ALL_PRIMARY_IDS = MOBILE_WHEEL_IDS | REMAN_WHEEL_IDS | NR_WHEEL_IDS
+
+def count_wheels_from_products(products):
+    """Count (mobile, reman, nr) wheels from a job's products[] list.
+    Uses product_id (NetSuite ID). Multiplies by quantity.
+    """
+    mobile = reman = nr = 0
+    for p in (products or []):
+        pid = str(p.get("product_id") or "").strip()
+        qty = int(p.get("quantity") or 1)
+        if pid in MOBILE_WHEEL_IDS:   mobile += qty
+        elif pid in REMAN_WHEEL_IDS:  reman  += qty
+        elif pid in NR_WHEEL_IDS:     nr     += qty
+    return mobile, reman, nr
+
+def count_wheels_from_line_items(line_items):
+    """Count (mobile, reman, nr) wheels from an invoice's line_items[].
+    Uses line_items[].product_ref_id.product_id.
+    """
+    mobile = reman = nr = 0
+    for li in (line_items or []):
+        pid = str((li.get("product_ref_id") or {}).get("product_id") or "").strip()
+        qty = int(li.get("quantity") or 1)
+        if pid in MOBILE_WHEEL_IDS:   mobile += qty
+        elif pid in REMAN_WHEEL_IDS:  reman  += qty
+        elif pid in NR_WHEEL_IDS:     nr     += qty
+    return mobile, reman, nr
+
 # ── Auth ──────────────────────────────────────────────────
 AUTH_SECRET   = os.environ.get("AUTH_SECRET") or uuid.uuid4().hex
 ALLOWED_EMAIL = re.compile(r"^[A-Za-z0-9._%+-]+@alloywheel\.com$", re.I)
@@ -377,29 +447,41 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
     tech_days      = set()  # (uid, day) pairs for unique tech-days
     employee_hours = {}
 
+    daily_nr = {d: 0 for d in workdays}
+
     for job in in_period:
         d = get_job_date(job)
         if d not in day_set: continue
         status = get_job_status(job).lower()
+        products = job.get("products") or []
+        mob, rem, nr_cnt = count_wheels_from_products(products)
+        job_wheels = mob + rem
         if status in COMPLETED_STATUSES:
-            daily_wheels[d] += 1
-            if is_mobile_job(job):
-                daily_mobile[d] += 1
-            else:
-                daily_reman[d] += 1
+            daily_wheels[d] += job_wheels
+            daily_mobile[d] += mob
+            daily_reman[d]  += rem
+            daily_nr[d]     += nr_cnt
         assigned = get_job_assigned_uids(job)
         dur = get_job_duration_hours(job)
         for uid in assigned:
             tech_days.add((uid, d))
             if uid not in employee_hours:
                 employee_hours[uid] = {"name": uid[:8], "hours": {dd: 0.0 for dd in workdays},
-                                        "wheels": {dd: 0 for dd in workdays}, "total_hrs": 0.0,
-                                        "total_wheels": 0, "type": "Hourly"}
+                                        "wheels": {dd: 0 for dd in workdays},
+                                        "mobile": {dd: 0 for dd in workdays},
+                                        "reman":  {dd: 0 for dd in workdays},
+                                        "total_hrs": 0.0, "total_wheels": 0,
+                                        "total_mobile": 0, "total_reman": 0,
+                                        "type": "Hourly"}
             employee_hours[uid]["hours"][d] = employee_hours[uid]["hours"].get(d, 0.0) + dur
             employee_hours[uid]["total_hrs"] += dur
             if status in COMPLETED_STATUSES:
-                employee_hours[uid]["wheels"][d] = employee_hours[uid]["wheels"].get(d, 0) + 1
-                employee_hours[uid]["total_wheels"] += 1
+                employee_hours[uid]["wheels"][d] = employee_hours[uid]["wheels"].get(d, 0) + job_wheels
+                employee_hours[uid]["mobile"][d] = employee_hours[uid]["mobile"].get(d, 0) + mob
+                employee_hours[uid]["reman"][d]  = employee_hours[uid]["reman"].get(d, 0)  + rem
+                employee_hours[uid]["total_wheels"] += job_wheels
+                employee_hours[uid]["total_mobile"] += mob
+                employee_hours[uid]["total_reman"]  += rem
         if assigned:
             daily_hours[d] = daily_hours.get(d, 0.0) + dur
 
@@ -432,19 +514,27 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
     est_revenue_reman  = total_reman  * REMAN_ASP
     est_revenue_total  = est_revenue_mobile + est_revenue_reman
 
+    total_nr = sum(daily_nr.values())
+
     emp_list = []
     for uid, v in employee_hours.items():
-        wtd_emp = v["total_wheels"] / max(len([d for d in workdays if v["hours"].get(d,0)>0]), 1)
+        active_days = len([d for d in workdays if v["hours"].get(d,0)>0]) or 1
+        wtd_emp = v["total_wheels"] / active_days
         status  = ("Over OT" if v["total_hrs"] > OT_THRESHOLD and v["type"]!="Salaried"
                    else "Watch" if v["total_hrs"] >= OT_THRESHOLD*0.8 and v["type"]!="Salaried"
                    else "Salaried" if v["type"]=="Salaried" else "On track")
         emp_list.append({
             "uid": uid, "name": v["name"], "type": v["type"],
-            "total_hrs": round(v["total_hrs"], 1), "total_wheels": v["total_wheels"],
+            "total_hrs": round(v["total_hrs"], 1),
+            "total_wheels": v["total_wheels"],
+            "total_mobile": v.get("total_mobile", 0),
+            "total_reman":  v.get("total_reman", 0),
             "wtd": round(wtd_emp, 1), "hrs_left": max(OT_THRESHOLD - v["total_hrs"], 0),
             "status": status,
             "daily_hrs":    {d: round(v["hours"].get(d,0.0),1) for d in workdays},
             "daily_wheels": {d: v["wheels"].get(d,0) for d in workdays},
+            "daily_mobile": {d: v["mobile"].get(d,0) for d in workdays},
+            "daily_reman":  {d: v["reman"].get(d,0)  for d in workdays},
         })
     emp_list.sort(key=lambda e: -e["total_wheels"])
 
@@ -471,6 +561,9 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
         "est_revenue": round(est_revenue_total),
         "est_revenue_mobile": round(est_revenue_mobile),
         "est_revenue_reman":  round(est_revenue_reman),
+        "total_nr": total_nr,
+        "nr_pct": round(total_nr / max(total_wheels + total_nr, 1) * 100, 1),
+        "daily_nr": daily_nr,
         "employees": emp_list,
         "total_jobs": len(jobs),
         "completed_jobs": len(completed),
