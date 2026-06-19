@@ -488,6 +488,40 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"keys": list(sample.keys()), "sample": sample})
             except Exception as e:
                 self.send_json({"error": str(e)})
+        elif path == "/api/debug_azuga_drivers":
+            # Fetch Azuga driver list to find numeric employee ID field
+            result = {}
+            try:
+                tok = azuga_token()
+                result["token"] = bool(tok)
+                if tok:
+                    for endpoint in [
+                        "https://services.azuga.com/reports/v3/driver",
+                        "https://services.azuga.com/api/v1/driver",
+                        "https://services.azuga.com/api/driver",
+                        "https://services.azuga.com/reports/v3/reports/driver",
+                    ]:
+                        try:
+                            req = urllib.request.Request(endpoint,
+                                headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+                            with urllib.request.urlopen(req, timeout=15) as r:
+                                data = json.loads(r.read())
+                            result["endpoint"] = endpoint
+                            result["status"] = "ok"
+                            result["keys"] = list(data.keys()) if isinstance(data, dict) else str(type(data))
+                            # Look for driver records
+                            records = (data.get("data") or {}).get("result") or data.get("data") or []
+                            if isinstance(records, list) and records:
+                                result["sample_driver"] = records[0]
+                                result["sample_keys"] = list(records[0].keys()) if isinstance(records[0], dict) else []
+                            else:
+                                result["raw_sample"] = str(data)[:500]
+                            break
+                        except Exception as e:
+                            result[endpoint] = str(e)
+            except Exception as e:
+                result["error"] = str(e)
+            self.send_json(result)
         elif path == "/api/debug_azuga":
             # Tests Azuga auth + one day of trips; returns raw data for debugging
             day = params.get("day") or (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
