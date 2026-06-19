@@ -300,19 +300,20 @@ def is_mobile_job(job):
 
 def fetch_jobs_for_period(start_date: str, end_date: str):
     """Fetch Zuper jobs for date range.
-    Uses page size 200 and breaks early if all jobs on a page predate the window by 30+ days
-    (Zuper returns jobs newest-first in practice, so this cuts off old pages quickly).
+    Zuper /jobs/filter returns jobs newest-first (confirmed by debug).
+    filter_rules don't filter server-side, so we do early termination:
+    stop as soon as max(date) in a page < start_date — all subsequent pages are older.
     """
-    start_dt  = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt    = datetime.strptime(end_date,   "%Y-%m-%d")
-    old_cutoff = start_dt - timedelta(days=30)
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt   = datetime.strptime(end_date,   "%Y-%m-%d")
     jobs = []
     for page in range(1, 61):
         try:
             resp  = zuper_post("/jobs/filter", {"limit": 200, "page": page, "filter_rules": []}, timeout=20)
             batch = resp.get("data") or []
             if not batch: break
-            in_range, all_old = [], True
+            in_range = []
+            max_date  = None  # newest date seen on this page
             for job in batch:
                 jd_str = get_job_date(job)
                 if not jd_str: continue
@@ -320,14 +321,15 @@ def fetch_jobs_for_period(start_date: str, end_date: str):
                     jd = datetime.strptime(jd_str, "%Y-%m-%d")
                     if start_dt <= jd <= end_dt:
                         in_range.append(job)
-                    if jd >= old_cutoff:
-                        all_old = False
+                    if max_date is None or jd > max_date:
+                        max_date = jd
                 except ValueError:
-                    all_old = False
+                    pass
             jobs.extend(in_range)
             if len(batch) < 200: break
-            if all_old:
-                print(f"[jobs] early stop p{page}: all jobs pre-date {old_cutoff.date()}", flush=True)
+            # Zuper is newest-first: if max date on this page is before our window, stop
+            if max_date is not None and max_date < start_dt:
+                print(f"[jobs] early stop p{page}: max={max_date.date()} < {start_date}", flush=True)
                 break
         except Exception as e:
             print(f"[jobs] p{page} {e}", flush=True)
