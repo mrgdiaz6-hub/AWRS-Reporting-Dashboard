@@ -1122,9 +1122,9 @@ async function loadAll(){
   document.getElementById('lastUpd').textContent='Loading…';
   driversLoaded=false; adminLoaded=false;
   await loadProduction();
-  // Reload drivers/admin if their tabs are visible
-  if(document.getElementById('tab-drivers').classList.contains('active')) await loadDrivers();
-  if(document.getElementById('tab-admin').classList.contains('active'))   await loadAdmin();
+  // Always pre-load fleet in background so Drivers tab is ready when clicked
+  loadDrivers();
+  if(document.getElementById('tab-admin').classList.contains('active')) await loadAdmin();
   document.getElementById('lastUpd').textContent='Updated '+new Date().toLocaleTimeString();
 }
 
@@ -1324,30 +1324,64 @@ function renderDrivers(f){
     </div>
     <div class="card"><div class="card-hdr"><span class="card-title">Daily Fleet Activity</span></div><div class="card-body">
     <table><thead><tr><th>Day</th><th class="tr">Trips</th><th class="tr">Miles</th><th class="tr">Drive Hrs</th><th class="tr">Vehicles</th></tr></thead><tbody>`;
-  const daily=f.daily||{};
-  Object.entries(daily).forEach(([d,v],i)=>{
+  Object.entries(f.daily||{}).forEach(([d,v])=>{
     html+=`<tr><td>${fmtDay(d)} <span style="color:var(--muted);font-size:.7rem">${d}</span></td>
       <td class="tr">${v.trips}</td><td class="tr">${v.miles.toLocaleString()}</td>
       <td class="tr">${v.hours.toFixed(1)}</td><td class="tr">${v.vehicles}</td></tr>`;
   });
   html+=`</tbody></table></div></div>`;
 
-  // Driver breakdown
-  const allDrivers={};
-  Object.values(daily).forEach(day=>{
-    Object.entries(day.drivers||{}).forEach(([name,v])=>{
-      if(!allDrivers[name]) allDrivers[name]={trips:0,miles:0,hours:0};
-      allDrivers[name].trips+=v.trips; allDrivers[name].miles+=v.miles; allDrivers[name].hours+=v.hours;
+  // Build wheel lookup from production data (Zuper employees joined by name)
+  const whlByName={};
+  if(PROD && PROD.employees){
+    PROD.employees.forEach(e=>{
+      whlByName[(e.name||'').toLowerCase()]={total:e.total_wheels||0, mobile:e.total_mobile||0, reman:e.total_reman||0};
     });
-  });
-  const dlist=Object.entries(allDrivers).sort((a,b)=>b[1].trips-a[1].trips);
+  }
+  const hasWheels=Object.keys(whlByName).length>0;
+
+  // Use backend-aggregated driver totals (f.drivers) — already summed across all days
+  const dlist=Object.entries(f.drivers||{}).sort((a,b)=>b[1].miles-a[1].miles);
   if(dlist.length){
-    html+=`<div class="card"><div class="card-hdr"><span class="card-title">Driver Summary</span></div><div class="card-body">
-    <table><thead><tr><th>Driver</th><th class="tr">Trips</th><th class="tr">Miles</th><th class="tr">Drive Hrs</th></tr></thead><tbody>`;
+    html+=`<div class="card"><div class="card-hdr"><span class="card-title">Driver Summary</span>
+      ${hasWheels?'<span style="font-size:.72rem;color:var(--muted);margin-left:8px">Wheels joined from Zuper production data</span>':''}
+    </div><div class="card-body">
+    <table><thead><tr>
+      <th>Driver</th>
+      <th class="tr">Trips</th>
+      <th class="tr">Miles</th>
+      <th class="tr">Drive Hrs</th>
+      <th class="tr">Mph Avg</th>
+      ${hasWheels?'<th class="tr">Wheels</th><th class="tr" title="Wheels repaired per mile driven">Whl/Mile</th>':''}
+    </tr></thead><tbody>`;
     dlist.forEach(([name,v])=>{
-      html+=`<tr><td>${esc(name)}</td><td class="tr">${v.trips}</td><td class="tr">${v.miles.toFixed(1)}</td><td class="tr">${v.hours.toFixed(1)}</td></tr>`;
+      const mph=v.hours>0?(v.miles/v.hours).toFixed(1):'—';
+      const wdata=whlByName[name.toLowerCase()]||{};
+      const wheels=wdata.total||0;
+      const wpm=v.miles>0&&wheels>0?(wheels/v.miles).toFixed(3):'—';
+      const wpmStyle=wpm!=='—'?(parseFloat(wpm)>=0.08?'color:var(--green)':parseFloat(wpm)>=0.04?'color:var(--yellow)':'color:var(--muted)'):'';
+      html+=`<tr>
+        <td>${esc(name)}<span style="font-size:.68rem;color:var(--muted);margin-left:5px">${v.designation||''}</span></td>
+        <td class="tr">${v.trips}</td>
+        <td class="tr">${v.miles.toFixed(1)}</td>
+        <td class="tr">${v.hours.toFixed(1)}</td>
+        <td class="tr">${mph}</td>
+        ${hasWheels?`<td class="tr">${wheels||'—'}</td><td class="tr" style="${wpmStyle}">${wpm}</td>`:''}
+      </tr>`;
     });
-    html+=`</tbody></table></div></div>`;
+    // Totals row
+    const totWheels=Object.values(whlByName).reduce((s,w)=>s+w.total,0);
+    const totMiles=dlist.reduce((s,[,v])=>s+v.miles,0);
+    const totWpm=totMiles>0&&totWheels>0?(totWheels/totMiles).toFixed(3):'—';
+    html+=`</tbody><tfoot><tr style="font-weight:700"><td>Total / Fleet</td>
+      <td class="tr">${t.trips}</td>
+      <td class="tr">${t.miles.toLocaleString()}</td>
+      <td class="tr">${t.hours.toFixed(1)}</td>
+      <td class="tr">${t.hours>0?(t.miles/t.hours).toFixed(1):'—'}</td>
+      ${hasWheels?`<td class="tr">${totWheels||'—'}</td><td class="tr">${totWpm}</td>`:''}
+    </tr></tfoot></table>
+    ${hasWheels?'<div style="margin-top:8px;font-size:.7rem;color:var(--muted)">Whl/Mile guide: <span style="color:var(--green)">≥0.080 Good</span> &nbsp;<span style="color:var(--yellow)">0.040–0.079 Avg</span> &nbsp;<span style="color:var(--muted)">&lt;0.040 Low</span></div>':''}
+    </div></div>`;
   }
   setEl('drivers-content', html);
 }
