@@ -299,27 +299,40 @@ def is_mobile_job(job):
     return "mobile" in cat or "mrf" in cat
 
 def fetch_jobs_for_period(start_date: str, end_date: str):
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt   = datetime.strptime(end_date,   "%Y-%m-%d")
+    """Fetch Zuper jobs for date range.
+    Uses page size 200 and breaks early if all jobs on a page predate the window by 30+ days
+    (Zuper returns jobs newest-first in practice, so this cuts off old pages quickly).
+    """
+    start_dt  = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt    = datetime.strptime(end_date,   "%Y-%m-%d")
+    old_cutoff = start_dt - timedelta(days=30)
     jobs = []
-    for page in range(1, 81):
+    for page in range(1, 61):
         try:
-            resp = zuper_post("/jobs/filter", {"limit": 100, "page": page, "filter_rules": []}, timeout=15)
+            resp  = zuper_post("/jobs/filter", {"limit": 200, "page": page, "filter_rules": []}, timeout=20)
             batch = resp.get("data") or []
             if not batch: break
+            in_range, all_old = [], True
             for job in batch:
                 jd_str = get_job_date(job)
                 if not jd_str: continue
                 try:
                     jd = datetime.strptime(jd_str, "%Y-%m-%d")
                     if start_dt <= jd <= end_dt:
-                        jobs.append(job)
+                        in_range.append(job)
+                    if jd >= old_cutoff:
+                        all_old = False
                 except ValueError:
-                    pass
-            if len(batch) < 100: break
+                    all_old = False
+            jobs.extend(in_range)
+            if len(batch) < 200: break
+            if all_old:
+                print(f"[jobs] early stop p{page}: all jobs pre-date {old_cutoff.date()}", flush=True)
+                break
         except Exception as e:
             print(f"[jobs] p{page} {e}", flush=True)
             break
+    print(f"[jobs] {start_date}→{end_date}: {len(jobs)} jobs", flush=True)
     return jobs
 
 # ── Azuga helpers ─────────────────────────────────────────
