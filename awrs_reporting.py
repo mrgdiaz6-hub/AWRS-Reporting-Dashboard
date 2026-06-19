@@ -317,11 +317,9 @@ def _trip_miles(t):
     return km / 1.60934
 
 def _trip_hours(t):
-    # tripTime is seconds in dispatcher; also try minutes fallback
+    # tripTime is always seconds in Azuga v3 API (confirmed: matches tsTime→teTime elapsed)
     raw = t.get("tripTime") or t.get("duration") or t.get("tripDuration") or 0
-    secs = float(raw)
-    # If suspiciously small it's probably minutes not seconds
-    return secs / 3600.0 if secs > 300 else secs / 60.0
+    return float(raw) / 3600.0
 
 def _trip_driver(t):
     return str(t.get("driver") or t.get("fullName") or t.get("driverName") or "Unknown").strip()
