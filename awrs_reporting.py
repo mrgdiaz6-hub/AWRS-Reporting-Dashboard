@@ -478,6 +478,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/config":        self.send_json({"wtd_target": WTD_TARGET, "ot_threshold": OT_THRESHOLD,
                                                            "mobile_asp": MOBILE_ASP, "reman_asp": REMAN_ASP,
                                                            "azuga": bool(AZUGA_USER), "paylocity": paylocity_available()})
+        elif path == "/api/debug_user":
+            # Returns first Zuper user object raw — used to identify numeric employee ID field
+            try:
+                resp = zuper_get("/user/all?limit=1&page=1")
+                users = resp.get("data") or []
+                sample = users[0] if users else {}
+                self.send_json({"keys": list(sample.keys()), "sample": sample})
+            except Exception as e:
+                self.send_json({"error": str(e)})
         else: self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
