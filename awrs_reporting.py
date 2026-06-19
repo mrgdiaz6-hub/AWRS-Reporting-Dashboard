@@ -712,6 +712,26 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 result["error"] = str(e)
             self.send_json(result)
+        elif path == "/api/debug_jobs_filter":
+            # Test Zuper filter_rules date filter formats
+            start = params.get("start") or date.today().strftime("%Y-%m-%d")
+            end   = params.get("end")   or start
+            result = {"start": start, "end": end, "formats_tried": []}
+            # Format 1: scheduled_start_time with between operator
+            for fmt_name, filter_rules in [
+                ("scheduled_start_time_between", [{"attribute":"scheduled_start_time","operator":"between","value":[f"{start}T00:00:00Z", f"{end}T23:59:59Z"]}]),
+                ("scheduled_start_time_gte_lte",  [{"attribute":"scheduled_start_time","operator":">=","value":f"{start}T00:00:00Z"},{"attribute":"scheduled_start_time","operator":"<=","value":f"{end}T23:59:59Z"}]),
+                ("job_date_between",              [{"attribute":"job_date","operator":"between","value":[start, end]}]),
+                ("empty_filter",                  []),
+            ]:
+                try:
+                    resp = zuper_post("/jobs/filter", {"limit":5,"page":1,"filter_rules":filter_rules}, timeout=10)
+                    batch = resp.get("data") or []
+                    dates = [get_job_date(j) for j in batch if get_job_date(j)]
+                    result["formats_tried"].append({"format":fmt_name,"count":len(batch),"sample_dates":dates[:5],"error":None})
+                except Exception as e:
+                    result["formats_tried"].append({"format":fmt_name,"count":0,"sample_dates":[],"error":str(e)})
+            self.send_json(result)
         else: self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
