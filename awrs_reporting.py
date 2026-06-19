@@ -134,13 +134,25 @@ def fetch_users():
 def build_employee_map():
     """Build cross-system employee lookup.
     Keys: normalized full name (lower), user_uid, emp_code (if numeric).
-    Value: {user_uid, emp_code, name, designation, email, team_uid}
+    Value: {user_uid, emp_code, name, designation, email, team_uid, hourly_rate}
     emp_code in Zuper = Employee ID in Azuga = Employee # in Paylocity.
     Azuga→Zuper join: fullName (lower) → emp_code.
     """
     c = cache_get("emp_map")
     if c: return c
     users = fetch_users()
+    # Build uid → team_uid mapping from teams
+    uid_to_team = {}
+    try:
+        teams = fetch_teams()
+        for t in teams:
+            tuid = t.get("team_uid") or t.get("uid") or ""
+            for m in (t.get("users") or []):
+                muid = m.get("user_uid") or m.get("uid") or ""
+                if muid and tuid:
+                    uid_to_team[muid] = tuid
+    except Exception:
+        pass
     by_name = {}  # normalized full name → record
     by_uid  = {}  # user_uid → record
     by_emp  = {}  # emp_code (numeric str) → record
@@ -158,6 +170,7 @@ def build_employee_map():
             "designation": u.get("designation") or "",
             "email":       u.get("email") or "",
             "hourly_rate": u.get("hourly_labor_charge"),
+            "team_uid":    uid_to_team.get(uid, ""),
         }
         if name: by_name[name.lower()] = rec
         if uid:  by_uid[uid]           = rec
@@ -299,7 +312,9 @@ def azuga_trips(day_str):
     return rows
 
 def _trip_miles(t):
-    return float(t.get("tripDistance") or t.get("distance") or t.get("totalDistance") or 0)
+    # Azuga tripDistance is in km — convert to miles
+    km = float(t.get("tripDistance") or t.get("distance") or t.get("totalDistance") or 0)
+    return km / 1.60934
 
 def _trip_hours(t):
     # tripTime is seconds in dispatcher; also try minutes fallback
@@ -657,51 +672,67 @@ class Handler(BaseHTTPRequestHandler):
     def api_fleet(self, params):
         start = params.get("start") or date.today().strftime("%Y-%m-%d")
         end   = params.get("end")   or start
-        key   = f"fleet_{start}_{end}"
+        loc   = params.get("location") or "all"
+        key   = f"fleet_{start}_{end}_{loc}"
         c     = cache_get(key)
         if c: self.send_json(c); return
         if not (AZUGA_USER and AZUGA_PASS):
             self.send_json({"stub": True, "message": "Set AZUGA_USERNAME and AZUGA_PASSWORD in Render environment."}); return
         try:
             emp_map = build_employee_map()
+            # Build set of driver names allowed for this location filter
+            loc_driver_names = None  # None = all
+            if loc and loc != "all":
+                loc_driver_names = {
+                    rec["name"].lower()
+                    for rec in emp_map["by_uid"].values()
+                    if rec.get("team_uid") == loc and rec.get("name")
+                }
             days = workdays_in_range(start, end)
             daily = {}
-            # Accumulate per-driver totals across all days for rollup
-            driver_totals = {}  # name → {trips, miles, hours, emp_code, designation}
+            driver_totals = {}  # name → {trips, miles, hours, emp_code, designation, days}
             for d in days:
                 trips = azuga_trips(d) or []
-                miles = sum(_trip_miles(t) for t in trips)
-                hrs   = sum(_trip_hours(t) for t in trips)
-                vehs  = len({_trip_vehicle(t) for t in trips if _trip_vehicle(t)})
                 drivers = {}
                 for t in trips:
                     drv = _trip_driver(t)
-                    if not drv: continue
+                    # Skip unnamed / unknown drivers
+                    if not drv or drv.lower() in ("unknown", ""):
+                        continue
                     emp = emp_lookup_by_name(drv, emp_map)
+                    # Apply location filter via team membership
+                    if loc_driver_names is not None and drv.lower() not in loc_driver_names:
+                        continue
+                    m = _trip_miles(t)
+                    h = _trip_hours(t)
                     if drv not in drivers:
                         drivers[drv] = {"trips":0,"miles":0.0,"hours":0.0,
                                         "emp_code": emp.get("emp_code",""),
                                         "designation": emp.get("designation","")}
                     drivers[drv]["trips"] += 1
-                    drivers[drv]["miles"] += _trip_miles(t)
-                    drivers[drv]["hours"] += _trip_hours(t)
-                    # accumulate into totals
+                    drivers[drv]["miles"] += m
+                    drivers[drv]["hours"] += h
                     if drv not in driver_totals:
                         driver_totals[drv] = {"trips":0,"miles":0.0,"hours":0.0,"days":0,
                                               "emp_code": emp.get("emp_code",""),
                                               "designation": emp.get("designation","")}
                     driver_totals[drv]["trips"] += 1
-                    driver_totals[drv]["miles"] += _trip_miles(t)
-                    driver_totals[drv]["hours"] += _trip_hours(t)
-                # mark active days per driver
+                    driver_totals[drv]["miles"] += m
+                    driver_totals[drv]["hours"] += h
                 for drv in drivers:
                     driver_totals[drv]["days"] = driver_totals[drv].get("days", 0) + 1
-                # round driver values
                 for drv in drivers:
                     drivers[drv]["miles"] = round(drivers[drv]["miles"], 1)
                     drivers[drv]["hours"] = round(drivers[drv]["hours"], 2)
-                daily[d] = {"trips": len(trips), "miles": round(miles,1), "hours": round(hrs,1), "vehicles": vehs, "drivers": drivers}
-            # round driver totals
+                # Day-level totals only count included drivers
+                inc_trips = list(drivers.values())
+                daily[d] = {
+                    "trips":    sum(v["trips"]  for v in inc_trips),
+                    "miles":    round(sum(v["miles"]  for v in inc_trips), 1),
+                    "hours":    round(sum(v["hours"]  for v in inc_trips), 1),
+                    "vehicles": len(drivers),
+                    "drivers":  drivers,
+                }
             for drv in driver_totals:
                 driver_totals[drv]["miles"] = round(driver_totals[drv]["miles"], 1)
                 driver_totals[drv]["hours"] = round(driver_totals[drv]["hours"], 2)
@@ -1165,7 +1196,8 @@ async function loadDrivers(){
   driversLoaded=true;
   setEl('drivers-content','<div class="loading"><span class="sp"></span>Loading Azuga fleet data…</div>');
   try{
-    FLEET=await apiFetch(`/api/fleet?start=${RANGE.start}&end=${RANGE.end}`);
+    const loc=document.getElementById('locationPicker').value;
+    FLEET=await apiFetch(`/api/fleet?start=${RANGE.start}&end=${RANGE.end}&location=${loc}`);
     renderDrivers(FLEET);
   }catch(e){
     setEl('drivers-content',`<div class="stub"><div class="ico">⚠️</div><div class="msg">Error: ${e.message}</div></div>`);
