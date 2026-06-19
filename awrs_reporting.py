@@ -88,30 +88,44 @@ NR_WHEEL_IDS = {
 }
 ALL_PRIMARY_IDS = MOBILE_WHEEL_IDS | REMAN_WHEEL_IDS | NR_WHEEL_IDS
 
-def count_wheels_from_products(products):
+def count_wheels_from_products(products, job_type=None):
     """Count (mobile, reman, nr) wheels from a job's products[] list.
-    Primary: product_id (NetSuite ID). Fallback: product_name keywords.
-    Multiplies by quantity.
+    job_type: 'mobile', 'reman', or None (unknown — fall back to product name).
+    Each product entry = 1 wheel (qty applied).
+    NR is detected from product name regardless of job_type.
     """
     mobile = reman = nr = 0
     for p in (products or []):
         pid  = str(p.get("product_id") or "").strip()
         name = (p.get("product_name") or "").lower()
         qty  = int(p.get("quantity") or 1)
-        if pid in MOBILE_WHEEL_IDS:
+        # NR detected by name regardless of job type
+        if "non-repairable" in name or "non repairable" in name or pid in NR_WHEEL_IDS:
+            nr += qty
+        elif job_type == "mobile":
             mobile += qty
-        elif pid in REMAN_WHEEL_IDS:
+        elif job_type == "reman":
             reman  += qty
-        elif pid in NR_WHEEL_IDS:
-            nr     += qty
-        # Fallback: match by product name (Zuper IDs may differ by environment)
-        elif "non-repairable" in name or "non repairable" in name:
-            nr     += qty
-        elif "mobile" in name or "onsite" in name:
-            mobile += qty
-        elif "remanufactur" in name or "structural repair" in name:
-            reman  += qty
+        else:
+            # No job_type context — fall back to product_id then name
+            if pid in MOBILE_WHEEL_IDS:     mobile += qty
+            elif pid in REMAN_WHEEL_IDS:    reman  += qty
+            elif "mobile" in name or "onsite" in name: mobile += qty
+            elif "remanufactur" in name or "structural" in name: reman += qty
     return mobile, reman, nr
+
+
+def get_job_type(job):
+    """Determine job type (mobile/reman/nr/other) from job_category.category_name."""
+    cat = job.get("job_category") or {}
+    name = (cat.get("category_name") or "").lower()
+    if "mobile" in name or "onsite" in name:
+        return "mobile"
+    if "remanufactur" in name or "reman" in name or "structural" in name:
+        return "reman"
+    if "non-repairable" in name or "non repairable" in name:
+        return "nr"
+    return "other"
 
 def count_wheels_from_line_items(line_items):
     """Count (mobile, reman, nr) wheels from an invoice's line_items[].
@@ -499,9 +513,10 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
     for job in in_period:
         d = get_job_date(job)
         if d not in day_set: continue
-        status = get_job_status(job).lower()
+        status   = get_job_status(job).lower()
+        jtype    = get_job_type(job)         # mobile / reman / nr / other
         products = job.get("products") or []
-        mob, rem, nr_cnt = count_wheels_from_products(products)
+        mob, rem, nr_cnt = count_wheels_from_products(products, job_type=jtype)
         job_wheels = mob + rem
         # Count wheels if job has products (products present = work was performed)
         # OR if status explicitly shows completion. This handles cases where status
