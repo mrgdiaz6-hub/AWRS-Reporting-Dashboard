@@ -90,28 +90,23 @@ ALL_PRIMARY_IDS = MOBILE_WHEEL_IDS | REMAN_WHEEL_IDS | NR_WHEEL_IDS
 
 def count_wheels_from_products(products, job_type=None):
     """Count (mobile, reman, nr) wheels from a job's products[] list.
-    job_type: 'mobile', 'reman', or None (unknown — fall back to product name).
-    Each product entry = 1 wheel (qty applied).
-    NR is detected from product name regardless of job_type.
+    Uses product_id (hardcoded sets) as primary signal.
+    Falls back to specific name patterns — avoids counting add-on services
+    like 'Machined Face' or 'Mount and Balance' as wheels.
+    job_type is accepted but not used (left for future use).
     """
     mobile = reman = nr = 0
     for p in (products or []):
         pid  = str(p.get("product_id") or "").strip()
         name = (p.get("product_name") or "").lower()
         qty  = int(p.get("quantity") or 1)
-        # NR detected by name regardless of job type
-        if "non-repairable" in name or "non repairable" in name or pid in NR_WHEEL_IDS:
-            nr += qty
-        elif job_type == "mobile":
+        if pid in NR_WHEEL_IDS or "non-repairable" in name or "non repairable" in name:
+            nr     += qty
+        elif pid in MOBILE_WHEEL_IDS or "mobile repair" in name or "mobile onsite" in name:
             mobile += qty
-        elif job_type == "reman":
+        elif pid in REMAN_WHEEL_IDS or "complete wheel remanufactur" in name or "structural repair" in name:
             reman  += qty
-        else:
-            # No job_type context — fall back to product_id then name
-            if pid in MOBILE_WHEEL_IDS:     mobile += qty
-            elif pid in REMAN_WHEEL_IDS:    reman  += qty
-            elif "mobile" in name or "onsite" in name: mobile += qty
-            elif "remanufactur" in name or "structural" in name: reman += qty
+        # else: add-on service (Machined Face, Mount and Balance, etc.) — skip
     return mobile, reman, nr
 
 
@@ -284,14 +279,21 @@ def emp_lookup_by_name(full_name, emp_map=None):
     return emp_map["by_name"].get(full_name.strip().lower(), {})
 
 def get_job_status(job):
-    # Zuper uses current_job_status in newer API responses; fall back to job_status, then current_status
-    for key in ("current_job_status", "job_status", "current_status"):
-        s = job.get(key)
-        if isinstance(s, dict):
-            name = (s.get("status_name") or s.get("name") or s.get("title") or "").strip()
-            if name: return name
-        elif isinstance(s, str) and s.strip():
-            return s.strip()
+    # current_job_status is a dict with the active status
+    cjs = job.get("current_job_status")
+    if isinstance(cjs, dict):
+        name = (cjs.get("status_name") or cjs.get("name") or "").strip()
+        if name: return name
+    # job_status is a list of history entries — take the last one
+    js = job.get("job_status")
+    if isinstance(js, list) and js:
+        last = js[-1]
+        name = (last.get("status_name") or last.get("name") or "").strip()
+        if name: return name
+    # Legacy fallback
+    cs = job.get("current_status")
+    if isinstance(cs, dict):
+        return (cs.get("status_name") or cs.get("name") or "").strip()
     return ""
 
 def get_job_date(job):
@@ -306,14 +308,25 @@ def get_job_assigned_uids(job):
     assigned = job.get("assigned_to") or []
     if isinstance(assigned, list):
         for u in assigned:
-            uid = u.get("user_uid") or u.get("uid") or ""
+            # Zuper structure: assigned_to[].user.user_uid
+            user_obj = u.get("user") or {}
+            uid = user_obj.get("user_uid") or u.get("user_uid") or u.get("uid") or ""
             if uid: uids.add(uid)
     elif isinstance(assigned, dict):
-        uid = assigned.get("user_uid") or assigned.get("uid") or ""
+        user_obj = assigned.get("user") or {}
+        uid = user_obj.get("user_uid") or assigned.get("user_uid") or assigned.get("uid") or ""
         if uid: uids.add(uid)
     return uids
 
 def get_job_team_uid(job):
+    # Team is nested inside assigned_to[].team in new Zuper API responses
+    assigned = job.get("assigned_to") or []
+    if isinstance(assigned, list) and assigned:
+        t = assigned[0].get("team") or {}
+        if isinstance(t, dict):
+            uid = t.get("team_uid") or t.get("uid") or ""
+            if uid: return uid
+    # Legacy: top-level team field
     t = job.get("team") or {}
     if isinstance(t, dict):
         return t.get("team_uid") or t.get("uid") or ""
