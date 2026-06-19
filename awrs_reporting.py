@@ -1140,6 +1140,8 @@ async function loadProduction(){
     renderWTDChart(PROD);
     renderProdTable(PROD);
     renderTechsTab(PROD);
+    // If fleet already loaded (pre-load beat production), re-render drivers to pick up wheel data
+    if(FLEET) renderDrivers(FLEET);
   }catch(e){
     setEl('prod-kpis',`<div class="loading" style="color:var(--red)">Error: ${e.message}</div>`);
   }
@@ -1338,21 +1340,23 @@ function renderDrivers(f){
       whlByName[(e.name||'').toLowerCase()]={total:e.total_wheels||0, mobile:e.total_mobile||0, reman:e.total_reman||0};
     });
   }
-  const hasWheels=Object.keys(whlByName).length>0;
+  const prodLoaded=!!PROD;
 
   // Use backend-aggregated driver totals (f.drivers) — already summed across all days
   const dlist=Object.entries(f.drivers||{}).sort((a,b)=>b[1].miles-a[1].miles);
   if(dlist.length){
-    html+=`<div class="card"><div class="card-hdr"><span class="card-title">Driver Summary</span>
-      ${hasWheels?'<span style="font-size:.72rem;color:var(--muted);margin-left:8px">Wheels joined from Zuper production data</span>':''}
-    </div><div class="card-body">
+    const prodNote=prodLoaded
+      ?'<span style="font-size:.72rem;color:var(--muted);margin-left:8px">Wheels joined from Zuper production data</span>'
+      :'<span style="font-size:.72rem;color:var(--yellow);margin-left:8px">⏳ Production still loading — wheel data pending</span>';
+    html+=`<div class="card"><div class="card-hdr"><span class="card-title">Driver Summary</span>${prodNote}</div><div class="card-body">
     <table><thead><tr>
       <th>Driver</th>
       <th class="tr">Trips</th>
       <th class="tr">Miles</th>
       <th class="tr">Drive Hrs</th>
       <th class="tr">Mph Avg</th>
-      ${hasWheels?'<th class="tr">Wheels</th><th class="tr" title="Wheels repaired per mile driven">Whl/Mile</th>':''}
+      <th class="tr">Wheels</th>
+      <th class="tr" title="Wheels repaired per mile driven">Whl/Mile</th>
     </tr></thead><tbody>`;
     dlist.forEach(([name,v])=>{
       const mph=v.hours>0?(v.miles/v.hours).toFixed(1):'—';
@@ -1366,7 +1370,8 @@ function renderDrivers(f){
         <td class="tr">${v.miles.toFixed(1)}</td>
         <td class="tr">${v.hours.toFixed(1)}</td>
         <td class="tr">${mph}</td>
-        ${hasWheels?`<td class="tr">${wheels||'—'}</td><td class="tr" style="${wpmStyle}">${wpm}</td>`:''}
+        <td class="tr">${prodLoaded?(wheels||'—'):'…'}</td>
+        <td class="tr" style="${wpmStyle}">${prodLoaded?wpm:'…'}</td>
       </tr>`;
     });
     // Totals row
@@ -1378,9 +1383,10 @@ function renderDrivers(f){
       <td class="tr">${t.miles.toLocaleString()}</td>
       <td class="tr">${t.hours.toFixed(1)}</td>
       <td class="tr">${t.hours>0?(t.miles/t.hours).toFixed(1):'—'}</td>
-      ${hasWheels?`<td class="tr">${totWheels||'—'}</td><td class="tr">${totWpm}</td>`:''}
+      <td class="tr">${prodLoaded?(totWheels||'—'):'…'}</td>
+      <td class="tr">${prodLoaded?totWpm:'…'}</td>
     </tr></tfoot></table>
-    ${hasWheels?'<div style="margin-top:8px;font-size:.7rem;color:var(--muted)">Whl/Mile guide: <span style="color:var(--green)">≥0.080 Good</span> &nbsp;<span style="color:var(--yellow)">0.040–0.079 Avg</span> &nbsp;<span style="color:var(--muted)">&lt;0.040 Low</span></div>':''}
+    <div style="margin-top:8px;font-size:.7rem;color:var(--muted)">Whl/Mile guide: <span style="color:var(--green)">≥0.080 Good</span> &nbsp;<span style="color:var(--yellow)">0.040–0.079 Avg</span> &nbsp;<span style="color:var(--muted)">&lt;0.040 Low</span></div>
     </div></div>`;
   }
   setEl('drivers-content', html);
