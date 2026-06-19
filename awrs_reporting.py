@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AWRS Reporting Dashboard — v2026-06-19b
+AWRS Reporting Dashboard — v2026-06-19c
 ────────────────────────────────────────
 Blended KPI dashboard: Zuper (production/techs) + Azuga (fleet/drivers) + Paylocity (labor/admin)
 
@@ -345,7 +345,7 @@ def is_mobile_job(job):
     return "mobile" in cat or "mrf" in cat
 
 PAGE_SIZE      = 100   # smaller payload per page → faster per-request response
-MAX_SCAN_SECS  = 120   # hard time budget for the entire scan
+MAX_SCAN_SECS  = 300   # hard time budget for the entire scan (5 min; month needs ~150 pages)
 
 def fetch_jobs_for_period(start_date: str, end_date: str):
     """Fetch Zuper jobs for date range.
@@ -357,7 +357,7 @@ def fetch_jobs_for_period(start_date: str, end_date: str):
     end_dt    = datetime.strptime(end_date,   "%Y-%m-%d")
     jobs      = []
     t0        = time.time()
-    for page in range(1, 81):
+    for page in range(1, 301):
         elapsed = time.time() - t0
         if elapsed > MAX_SCAN_SECS:
             print(f"[jobs] time limit reached at p{page} ({elapsed:.0f}s), returning {len(jobs)} jobs", flush=True)
@@ -860,26 +860,59 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json([])
 
     def api_production(self, params):
+        import traceback as _tb
         start  = params.get("start") or date.today().strftime("%Y-%m-%d")
         end    = params.get("end")   or start
         loc    = params.get("location") or "all"
         key    = f"prod_{start}_{end}_{loc}"
-        c      = cache_get(key)
+
+        # 1. Specific-location KPI cache hit → instant response
+        c = cache_get(key)
         if c: self.send_json(c); return
-        # Cache miss — kick off background fetch and return 202 immediately
-        # (Zuper job scan takes 30-90s; Render's request timeout is 30s)
+
+        # 2. Raw jobs already cached for this date range → compute KPIs locally (fast, no Zuper scan)
+        jkey = f"jobs_{start}_{end}"
+        jobs = cache_get(jkey)
+        if jobs is not None:
+            try:
+                kpis = compute_production_kpis(jobs, start, end, team_uid=loc)
+                emp_map = build_employee_map()
+                for e in kpis["employees"]:
+                    rec = emp_map["by_uid"].get(e["uid"], {})
+                    if rec.get("name"):        e["name"]        = rec["name"]
+                    if rec.get("emp_code"):    e["emp_code"]    = rec["emp_code"]
+                    if rec.get("designation"): e["designation"] = rec["designation"]
+                cache_set(key, kpis, 90)
+                self.send_json(kpis)
+            except Exception as e:
+                print(f"[production] KPI compute error: {e}", flush=True)
+                _tb.print_exc()
+                self.send_json({"error": str(e)}, 500)
+            return
+
+        # 3. Full cache miss — always kick off "all" scan to populate raw jobs cache.
+        #    Location-specific requests will compute instantly once "all" scan completes.
+        all_key = f"prod_{start}_{end}_all"
         with _warming_lock:
-            already = key in _warming
+            already = all_key in _warming
             if not already:
-                _warming.add(key)
+                _warming.add(all_key)
         if not already:
             threading.Thread(target=self._warm_production,
-                             args=(key, start, end, loc), daemon=True).start()
+                             args=(all_key, start, end, "all"), daemon=True).start()
         self.send_json({"status": "loading"}, 202)
 
     def _warm_production(self, key, start, end, loc):
+        import traceback as _tb
         try:
-            jobs = fetch_jobs_for_period(start, end)
+            # Always scan "all" so we can populate the raw jobs cache.
+            # Location-specific keys recompute from the cached jobs list.
+            jkey = f"jobs_{start}_{end}"
+            jobs = cache_get(jkey)
+            if jobs is None:
+                jobs = fetch_jobs_for_period(start, end)
+                cache_set(jkey, jobs, 600)   # 10-min raw jobs cache
+                print(f"[production warm] jobs cached: {len(jobs)} for {start}→{end}", flush=True)
             kpis = compute_production_kpis(jobs, start, end, team_uid=loc)
             emp_map = build_employee_map()
             for e in kpis["employees"]:
@@ -891,6 +924,7 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[production warm] {key} ready", flush=True)
         except Exception as e:
             print(f"[production warm] {key} error: {e}", flush=True)
+            _tb.print_exc()
         finally:
             with _warming_lock:
                 _warming.discard(key)
@@ -1636,23 +1670,19 @@ async function logout(){await fetch('/api/logout',{method:'POST'});location.relo
 </body></html>"""
 
 # ── Startup cache pre-warm ────────────────────────────────
-def _prewarm_production():
-    """Pre-warm production cache for the current week on startup.
-    Runs in a background thread so the server starts immediately.
-    When the first user loads the dashboard, the cache is already warm (or warming).
-    """
-    today = date.today()
-    mon   = today - timedelta(days=today.weekday())
-    start = mon.strftime("%Y-%m-%d")
-    end   = min(mon + timedelta(days=4), today).strftime("%Y-%m-%d")
-    key   = f"prod_{start}_{end}_all"
+def _do_prewarm(label, start, end):
+    """Internal: fetch + cache jobs and KPIs for one date range."""
+    import traceback as _tb
+    key = f"prod_{start}_{end}_all"
+    jkey = f"jobs_{start}_{end}"
     with _warming_lock:
         if key in _warming:
             return
         _warming.add(key)
     try:
-        print(f"[prewarm] starting production scan {start}→{end}", flush=True)
+        print(f"[prewarm] {label} scan {start}→{end}", flush=True)
         jobs = fetch_jobs_for_period(start, end)
+        cache_set(jkey, jobs, 600)   # 10-min raw jobs cache (serves location filters)
         kpis = compute_production_kpis(jobs, start, end, team_uid="all")
         emp_map = build_employee_map()
         for e in kpis["employees"]:
@@ -1661,12 +1691,31 @@ def _prewarm_production():
             if rec.get("emp_code"):    e["emp_code"]    = rec["emp_code"]
             if rec.get("designation"): e["designation"] = rec["designation"]
         cache_set(key, kpis, 90)
-        print(f"[prewarm] production ready — {len(jobs)} jobs", flush=True)
+        print(f"[prewarm] {label} ready — {len(jobs)} jobs", flush=True)
     except Exception as e:
-        print(f"[prewarm] error: {e}", flush=True)
+        print(f"[prewarm] {label} error: {e}", flush=True)
+        _tb.print_exc()
     finally:
         with _warming_lock:
             _warming.discard(key)
+
+def _prewarm_production():
+    """Pre-warm this-week AND this-month production caches on startup (sequentially).
+    Runs in a background thread so the server starts immediately.
+    """
+    today = date.today()
+    mon   = today - timedelta(days=today.weekday())
+
+    # ── This Week ──────────────────────────────────────────
+    w_start = mon.strftime("%Y-%m-%d")
+    w_end   = min(mon + timedelta(days=4), today).strftime("%Y-%m-%d")
+    _do_prewarm("week", w_start, w_end)
+
+    # ── This Month ─────────────────────────────────────────
+    m_start = date(today.year, today.month, 1).strftime("%Y-%m-%d")
+    m_end   = today.strftime("%Y-%m-%d")
+    if m_start != w_start or m_end != w_end:   # skip if same as week (e.g. first Mon of month)
+        _do_prewarm("month", m_start, m_end)
 
 # ── Server ────────────────────────────────────────────────
 def main():
