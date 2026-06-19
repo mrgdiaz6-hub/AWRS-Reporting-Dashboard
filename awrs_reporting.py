@@ -729,6 +729,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 result["error"] = str(e)
             self.send_json(result)
+        elif path == "/api/debug_job_sample":
+            # Show raw structure of 3 recent jobs to diagnose wheel counting
+            try:
+                resp  = zuper_post("/jobs/filter", {"limit": 3, "page": 1, "filter_rules": []}, timeout=15)
+                batch = resp.get("data") or []
+                samples = []
+                for job in batch:
+                    samples.append({
+                        "top_level_keys":  sorted(job.keys()),
+                        "status":          get_job_status(job),
+                        "date":            get_job_date(job),
+                        "assigned_uids":   list(get_job_assigned_uids(job)),
+                        "products":        job.get("products"),
+                        "line_items":      job.get("line_items"),
+                        "invoice":         job.get("invoice"),
+                        "current_status":  job.get("current_status"),
+                        "job_category":    job.get("job_category"),
+                        "custom_fields":   job.get("custom_fields"),
+                    })
+                self.send_json({"count": len(batch), "jobs": samples})
+            except Exception as e:
+                self.send_json({"error": str(e)})
         elif path == "/api/debug_jobs_filter":
             # Test Zuper filter_rules date filter formats
             start = params.get("start") or date.today().strftime("%Y-%m-%d")
