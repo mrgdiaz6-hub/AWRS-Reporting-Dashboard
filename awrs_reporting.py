@@ -1180,31 +1180,46 @@ async function loadAll(){
 
 // ── Production ─────────────────────────────────────────────
 let _prodPollTimer=null;
+let _prodPollCount=0;
 async function loadProduction(){
   if(_prodPollTimer){clearTimeout(_prodPollTimer);_prodPollTimer=null;}
   setEl('prod-kpis','<div class="loading"><span class="sp"></span>Loading…</div>');
   setEl('prod-table','<div class="loading"><span class="sp"></span>Loading…</div>');
   const loc=document.getElementById('locationPicker').value;
+  const url=`/api/production?start=${RANGE.start}&end=${RANGE.end}&location=${loc}`;
+  let data;
   try{
-    const url=`/api/production?start=${RANGE.start}&end=${RANGE.end}&location=${loc}`;
-    let data=await apiFetch(url);
-    // Server returns 202 + {status:"loading"} while Zuper job scan runs in background
-    if(data && data.status==='loading'){
-      setEl('prod-kpis','<div class="loading"><span class="sp"></span>Scanning jobs… (this takes ~30–60s on first load)</div>');
-      _prodPollTimer=setTimeout(loadProduction, 6000);
-      return;
-    }
-    PROD=data;
-    renderProdKPIs(PROD);
-    renderWheelsChart(PROD);
-    renderWTDChart(PROD);
-    renderProdTable(PROD);
-    renderTechsTab(PROD);
-    // If fleet already loaded (pre-load beat production), re-render drivers to pick up wheel data
-    if(FLEET) renderDrivers(FLEET);
+    data=await apiFetch(url);
   }catch(e){
-    setEl('prod-kpis',`<div class="loading" style="color:var(--red)">Error: ${e.message}</div>`);
+    // 502/503 = server still starting or restarting — retry silently
+    const retryable=e.message.includes('502')||e.message.includes('503')||e.message.includes('fetch');
+    if(retryable && _prodPollCount<20){
+      _prodPollCount++;
+      setEl('prod-kpis','<div class="loading"><span class="sp"></span>Connecting to server…</div>');
+      _prodPollTimer=setTimeout(loadProduction,8000);
+    }else{
+      setEl('prod-kpis',`<div class="loading" style="color:var(--red)">Error: ${e.message}</div>`);
+      _prodPollCount=0;
+    }
+    return;
   }
+  // Server returns 202 + {status:"loading"} while Zuper job scan runs in background
+  if(data && data.status==='loading'){
+    _prodPollCount++;
+    const elapsed=_prodPollCount*6;
+    setEl('prod-kpis',`<div class="loading"><span class="sp"></span>Scanning Zuper jobs… (~${elapsed}s elapsed, checking every 6s)</div>`);
+    _prodPollTimer=setTimeout(loadProduction,6000);
+    return;
+  }
+  _prodPollCount=0;
+  PROD=data;
+  renderProdKPIs(PROD);
+  renderWheelsChart(PROD);
+  renderWTDChart(PROD);
+  renderProdTable(PROD);
+  renderTechsTab(PROD);
+  // If fleet already loaded (pre-load beat production), re-render drivers to pick up wheel data
+  if(FLEET) renderDrivers(FLEET);
 }
 
 function renderProdKPIs(d){
@@ -1535,10 +1550,45 @@ async function logout(){await fetch('/api/logout',{method:'POST'});location.relo
 </script>
 </body></html>"""
 
+# ── Startup cache pre-warm ────────────────────────────────
+def _prewarm_production():
+    """Pre-warm production cache for the current week on startup.
+    Runs in a background thread so the server starts immediately.
+    When the first user loads the dashboard, the cache is already warm (or warming).
+    """
+    today = date.today()
+    mon   = today - timedelta(days=today.weekday())
+    start = mon.strftime("%Y-%m-%d")
+    end   = min(mon + timedelta(days=4), today).strftime("%Y-%m-%d")
+    key   = f"prod_{start}_{end}_all"
+    with _warming_lock:
+        if key in _warming:
+            return
+        _warming.add(key)
+    try:
+        print(f"[prewarm] starting production scan {start}→{end}", flush=True)
+        jobs = fetch_jobs_for_period(start, end)
+        kpis = compute_production_kpis(jobs, start, end, team_uid="all")
+        emp_map = build_employee_map()
+        for e in kpis["employees"]:
+            rec = emp_map["by_uid"].get(e["uid"], {})
+            if rec.get("name"):        e["name"]        = rec["name"]
+            if rec.get("emp_code"):    e["emp_code"]    = rec["emp_code"]
+            if rec.get("designation"): e["designation"] = rec["designation"]
+        cache_set(key, kpis, 90)
+        print(f"[prewarm] production ready — {len(jobs)} jobs", flush=True)
+    except Exception as e:
+        print(f"[prewarm] error: {e}", flush=True)
+    finally:
+        with _warming_lock:
+            _warming.discard(key)
+
 # ── Server ────────────────────────────────────────────────
 def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"AWRS Reporting Dashboard → http://localhost:{PORT}", flush=True)
+    # Pre-warm production cache in the background so first page load is instant
+    threading.Thread(target=_prewarm_production, daemon=False, name="prewarm").start()
     if IS_LOCAL:
         import webbrowser, threading
         threading.Timer(0.8, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
