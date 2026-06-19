@@ -1590,7 +1590,7 @@ def main():
     # Pre-warm production cache in the background so first page load is instant
     threading.Thread(target=_prewarm_production, daemon=False, name="prewarm").start()
     if IS_LOCAL:
-        import webbrowser, threading
+        import webbrowser
         threading.Timer(0.8, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
     try:
         server.serve_forever()
