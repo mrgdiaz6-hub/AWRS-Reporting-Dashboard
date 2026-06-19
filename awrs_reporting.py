@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AWRS Reporting Dashboard — v2026-06-19c
+AWRS Reporting Dashboard — v2026-06-19d
 ────────────────────────────────────────
 Blended KPI dashboard: Zuper (production/techs) + Azuga (fleet/drivers) + Paylocity (labor/admin)
 
@@ -852,7 +852,8 @@ class Handler(BaseHTTPRequestHandler):
         if c: self.send_json(c); return
         try:
             teams = fetch_teams()
-            result = [{"uid": t.get("team_uid") or t.get("uid",""), "name": t.get("name","?")} for t in teams]
+            result = [{"uid": t.get("team_uid") or t.get("uid",""),
+                       "name": t.get("team_name") or t.get("name") or "?"} for t in teams]
             result = [r for r in result if r["uid"]]
             cache_set("locations", result, 300)
             self.send_json(result)
