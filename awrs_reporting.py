@@ -1150,19 +1150,21 @@ function renderProdKPIs(d){
   const varS=d.variance>=0?'+':'';
   const wtdC=d.wtd>=CFG.wtd_target?'c-green':d.wtd>=CFG.wtd_target*.9?'c-yellow':'c-red';
   const pctC=d.pct_of_target>=95?'c-green':d.pct_of_target>=80?'c-yellow':'c-red';
+  const nr=d.total_nr||0, nrPct=d.nr_pct||0;
+  const nrC=nrPct<=5?'c-green':nrPct<=10?'c-yellow':'c-red';
   document.getElementById('prod-kpis').innerHTML=`
     <div class="kpi ${pctC}"><div class="kpi-lbl">Total Wheels</div><div class="kpi-val">${n(d.total_wheels)}</div>
       <div class="kpi-sub">Target ~${n(d.total_target)} &nbsp;<span class="${varC}">${varS}${n(d.variance)}</span></div></div>
     <div class="kpi ${wtdC}"><div class="kpi-lbl">W/T/D (Blended)</div><div class="kpi-val">${d.wtd.toFixed(1)}</div>
       <div class="kpi-sub">Target ${CFG.wtd_target.toFixed(1)} &nbsp;|&nbsp; Mobile ${d.wtd_mobile.toFixed(1)} / Reman ${d.wtd_reman.toFixed(1)}</div></div>
-    <div class="kpi ${pctC}"><div class="kpi-lbl">% of Target</div><div class="kpi-val">${d.pct_of_target}%</div>
-      <div class="kpi-sub">${d.days_left} workday${d.days_left!==1?'s':''} remaining</div></div>
-    <div class="kpi"><div class="kpi-lbl">Pace Needed / Day</div><div class="kpi-val">${d.pace_per_day>0?n(d.pace_per_day):'✓'}</div>
-      <div class="kpi-sub">${d.pace_per_day>0?'wheels per remaining day':'On or ahead of target'}</div></div>
     <div class="kpi"><div class="kpi-lbl">Mobile Wheels</div><div class="kpi-val">${n(d.total_mobile)}</div>
       <div class="kpi-sub">Est. $${n(d.est_revenue_mobile)} rev @ $${CFG.mobile_asp} ASP</div></div>
     <div class="kpi"><div class="kpi-lbl">Reman Wheels</div><div class="kpi-val">${n(d.total_reman)}</div>
       <div class="kpi-sub">Est. $${n(d.est_revenue_reman)} rev @ $${CFG.reman_asp} ASP</div></div>
+    <div class="kpi ${nrC}"><div class="kpi-lbl">Non-Repairable (NR)</div><div class="kpi-val">${nr}</div>
+      <div class="kpi-sub">${nrPct}% of total repairs &nbsp;|&nbsp; <span class="${nrC}">${nrPct<=5?'▼ Low':nrPct<=10?'▲ Elevated':'⚠ High'}</span></div></div>
+    <div class="kpi ${pctC}"><div class="kpi-lbl">% of Target</div><div class="kpi-val">${d.pct_of_target}%</div>
+      <div class="kpi-sub">${d.days_left} workday${d.days_left!==1?'s':''} remaining &nbsp;|&nbsp; ${d.pace_per_day>0?n(d.pace_per_day)+' needed/day':'On pace ✓'}</div></div>
     <div class="kpi c-purple"><div class="kpi-lbl">Est. Total Revenue</div><div class="kpi-val">$${n(d.est_revenue)}</div>
       <div class="kpi-sub">${n(d.completed_jobs)} jobs / ${n(d.total_jobs)} total</div></div>
     <div class="kpi ${d.over_ot>0?'c-red':d.on_watch>0?'c-yellow':'c-green'}">
@@ -1176,12 +1178,14 @@ function renderWheelsChart(d){
   const days=d.workdays, labels=days.map(dd=>fmtDay(dd));
   const mobile=days.map(dd=>d.daily_mobile[dd]||0);
   const reman =days.map(dd=>d.daily_reman[dd]||0);
+  const nr    =days.map(dd=>d.daily_nr[dd]||0);
   const dtarget=Array(days.length).fill(CFG.wtd_target*(d.num_techs||1));
   wheelsChart=new Chart(document.getElementById('wheelsChart'),{
     type:'bar',
     data:{labels,datasets:[
       {label:'Mobile',data:mobile,backgroundColor:'rgba(59,130,246,.75)',borderRadius:4,stack:'a'},
       {label:'Reman', data:reman, backgroundColor:'rgba(168,85,247,.75)',borderRadius:4,stack:'a'},
+      {label:'NR',    data:nr,    backgroundColor:'rgba(239,68,68,.5)', borderRadius:4,stack:'a'},
       {label:'Target',data:dtarget,type:'line',borderColor:'rgba(239,68,68,.7)',borderWidth:2,borderDash:[5,3],pointRadius:0,fill:false}
     ]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#94a3b8',font:{size:10}}}},
@@ -1214,34 +1218,36 @@ function renderWTDChart(d){
 
 function renderProdTable(d){
   const days=d.workdays;
-  let html=`<table><thead><tr><th>Day</th><th class="tr">Mobile</th><th class="tr">Reman</th><th class="tr">Total</th><th class="tr">Hours</th><th class="tr">Ratio</th><th class="tr">W/T/D</th></tr></thead><tbody>`;
+  let html=`<table><thead><tr><th>Day</th><th class="tr">Mobile</th><th class="tr">Reman</th><th class="tr">Total</th><th class="tr" style="color:var(--red)">NR</th><th class="tr" style="color:var(--red)">NR%</th><th class="tr">Hours</th><th class="tr">W/T/D</th></tr></thead><tbody>`;
   days.forEach((day,i)=>{
     const mob=d.daily_mobile[day]||0, rem=d.daily_reman[day]||0, tot=d.daily_wheels[day]||0;
+    const nr=d.daily_nr[day]||0, nrPct=tot+nr>0?((nr/(tot+nr))*100).toFixed(1):'0.0';
+    const nrC=parseFloat(nrPct)<=5?'':'color:var('+(parseFloat(nrPct)<=10?'--yellow':'--red')+')';
     const hrs=d.daily_hours[day]||0, rat=d.daily_ratio[day]||0;
     const activeTechs=d.employees.filter(e=>(e.daily_wheels[day]||0)>0).length||1;
     const wtd=+(tot/activeTechs).toFixed(1);
-    const rc=rat<0.85?'chip-red':rat<0.95?'chip-yellow':rat<=1.1?'chip-green':'chip-blue';
     const wc=wtd>=CFG.wtd_target?'chip-green':wtd>=CFG.wtd_target*.9?'chip-yellow':'chip-red';
     html+=`<tr><td>${fmtDay(day)}<span style="color:var(--muted);font-size:.7rem;margin-left:6px">${day}</span></td>
       <td class="tr">${mob}</td><td class="tr">${rem}</td><td class="tr"><strong>${tot}</strong></td>
+      <td class="tr" style="${nrC}">${nr||'—'}</td>
+      <td class="tr" style="${nrC}">${nr?nrPct+'%':'—'}</td>
       <td class="tr">${hrs}</td>
-      <td class="tr"><span class="chip ${rc}">${rat.toFixed(2)}</span></td>
       <td class="tr"><span class="chip ${wc}">${wtd}</span></td></tr>`;
   });
-  const tw=d.total_wheels, rat=d.weekly_ratio;
-  const rc=rat<0.85?'chip-red':rat<0.95?'chip-yellow':rat<=1.1?'chip-green':'chip-blue';
+  const tw=d.total_wheels, tnr=d.total_nr||0, tnrPct=d.nr_pct||0;
+  const nrTotC=tnrPct<=5?'':'color:var('+(tnrPct<=10?'--yellow':'--red')+')';
   const wc=d.wtd>=CFG.wtd_target?'chip-green':d.wtd>=CFG.wtd_target*.9?'chip-yellow':'chip-red';
   html+=`</tbody><tfoot><tr style="font-weight:700"><td>Total / Avg</td>
     <td class="tr">${d.total_mobile}</td><td class="tr">${d.total_reman}</td><td class="tr">${tw}</td>
+    <td class="tr" style="${nrTotC}">${tnr||'—'}</td>
+    <td class="tr" style="${nrTotC}">${tnr?tnrPct+'%':'—'}</td>
     <td class="tr">${d.total_hours}</td>
-    <td class="tr"><span class="chip ${rc}">${rat.toFixed(2)}</span></td>
     <td class="tr"><span class="chip ${wc}">${d.wtd.toFixed(1)}</span></td>
   </tr></tfoot></table>
   <div style="margin-top:10px;font-size:.7rem;color:var(--muted)">
-    Ratio guide: <span class="chip chip-red">&lt;0.85</span>&nbsp;
-    <span class="chip chip-yellow">0.85–0.95</span>&nbsp;
-    <span class="chip chip-green">0.95–1.10</span>&nbsp;
-    <span class="chip chip-blue">&gt;1.10</span>&nbsp;&nbsp;
+    NR% guide: <span style="color:var(--green)">≤5% Good</span> &nbsp;
+    <span style="color:var(--yellow)">5–10% Elevated</span> &nbsp;
+    <span style="color:var(--red)">&gt;10% High</span> &nbsp;&nbsp;|&nbsp;&nbsp;
     W/T/D target: <strong>${CFG.wtd_target}</strong> wheels per tech per day
   </div>`;
   setEl('prod-table', html);
@@ -1264,13 +1270,16 @@ function renderTechsTab(d){
     setEl('techs-table','<div style="color:var(--muted);font-size:.82rem;text-align:center;padding:28px">No tech assignments found for this period in Zuper.</div>');
     return;
   }
-  let html=`<table><thead><tr><th>Technician</th>${days.map(d=>`<th class="tr">${fmtDay(d)}</th>`).join('')}<th class="tr">Total Whl</th><th class="tr">Total Hrs</th><th class="tr">W/T/D</th><th class="tr">Hrs Left</th><th>Status</th></tr></thead><tbody>`;
+  let html=`<table><thead><tr><th>Technician</th>${days.map(d=>`<th class="tr">${fmtDay(d)}</th>`).join('')}<th class="tr">Mobile</th><th class="tr">Reman</th><th class="tr">Total Whl</th><th class="tr">Total Hrs</th><th class="tr">W/T/D</th><th class="tr">Hrs Left</th><th>Status</th></tr></thead><tbody>`;
   emps.forEach(e=>{
     const bc={'On track':'badge on-track','Watch':'badge watch','Over OT':'badge over-ot','Salaried':'badge salaried'}[e.status]||'badge';
     const wc=e.wtd>=CFG.wtd_target?'chip-green':e.wtd>=CFG.wtd_target*.9?'chip-yellow':'chip-red';
     const hc=e.total_hrs>CFG.ot_threshold?'neg':e.total_hrs>=CFG.ot_threshold*.8?'warn':'';
+    const mob=e.total_mobile||0, rem=e.total_reman||0;
     html+=`<tr><td>${esc(e.name)}<span style="color:var(--muted);font-size:.68rem;margin-left:5px">${e.type}</span></td>
       ${days.map(d=>{const w=e.daily_wheels[d]||0;const h=(e.daily_hrs||{})[d]||0;return`<td class="tr" style="font-size:.75rem">${w?w+' whl':''}<br>${h?h+'h':''}</td>`;}).join('')}
+      <td class="tr">${mob||'—'}</td>
+      <td class="tr">${rem||'—'}</td>
       <td class="tr"><strong>${e.total_wheels}</strong></td>
       <td class="tr ${hc}">${e.total_hrs}</td>
       <td class="tr"><span class="chip ${wc}">${e.wtd.toFixed(1)}</span></td>
