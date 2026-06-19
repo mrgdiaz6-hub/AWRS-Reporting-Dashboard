@@ -90,15 +90,27 @@ ALL_PRIMARY_IDS = MOBILE_WHEEL_IDS | REMAN_WHEEL_IDS | NR_WHEEL_IDS
 
 def count_wheels_from_products(products):
     """Count (mobile, reman, nr) wheels from a job's products[] list.
-    Uses product_id (NetSuite ID). Multiplies by quantity.
+    Primary: product_id (NetSuite ID). Fallback: product_name keywords.
+    Multiplies by quantity.
     """
     mobile = reman = nr = 0
     for p in (products or []):
-        pid = str(p.get("product_id") or "").strip()
-        qty = int(p.get("quantity") or 1)
-        if pid in MOBILE_WHEEL_IDS:   mobile += qty
-        elif pid in REMAN_WHEEL_IDS:  reman  += qty
-        elif pid in NR_WHEEL_IDS:     nr     += qty
+        pid  = str(p.get("product_id") or "").strip()
+        name = (p.get("product_name") or "").lower()
+        qty  = int(p.get("quantity") or 1)
+        if pid in MOBILE_WHEEL_IDS:
+            mobile += qty
+        elif pid in REMAN_WHEEL_IDS:
+            reman  += qty
+        elif pid in NR_WHEEL_IDS:
+            nr     += qty
+        # Fallback: match by product name (Zuper IDs may differ by environment)
+        elif "non-repairable" in name or "non repairable" in name:
+            nr     += qty
+        elif "mobile" in name or "onsite" in name:
+            mobile += qty
+        elif "remanufactur" in name or "structural repair" in name:
+            reman  += qty
     return mobile, reman, nr
 
 def count_wheels_from_line_items(line_items):
@@ -258,10 +270,15 @@ def emp_lookup_by_name(full_name, emp_map=None):
     return emp_map["by_name"].get(full_name.strip().lower(), {})
 
 def get_job_status(job):
-    cs = job.get("current_status") or {}
-    if isinstance(cs, dict):
-        return (cs.get("status_name") or cs.get("name") or "").strip()
-    return str(cs).strip()
+    # Zuper uses current_job_status in newer API responses; fall back to job_status, then current_status
+    for key in ("current_job_status", "job_status", "current_status"):
+        s = job.get(key)
+        if isinstance(s, dict):
+            name = (s.get("status_name") or s.get("name") or s.get("title") or "").strip()
+            if name: return name
+        elif isinstance(s, str) and s.strip():
+            return s.strip()
+    return ""
 
 def get_job_date(job):
     return (job.get("scheduled_start_time") or job.get("created_on") or "")[:10]
@@ -486,7 +503,11 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
         products = job.get("products") or []
         mob, rem, nr_cnt = count_wheels_from_products(products)
         job_wheels = mob + rem
-        if status in COMPLETED_STATUSES:
+        # Count wheels if job has products (products present = work was performed)
+        # OR if status explicitly shows completion. This handles cases where status
+        # field name varies across Zuper API versions.
+        count_wheels = job_wheels > 0 or (status and status in COMPLETED_STATUSES)
+        if count_wheels:
             daily_wheels[d] += job_wheels
             daily_mobile[d] += mob
             daily_reman[d]  += rem
@@ -505,7 +526,7 @@ def compute_production_kpis(jobs, start_date, end_date, team_uid=None):
                                         "type": "Hourly"}
             employee_hours[uid]["hours"][d] = employee_hours[uid]["hours"].get(d, 0.0) + dur
             employee_hours[uid]["total_hrs"] += dur
-            if status in COMPLETED_STATUSES:
+            if count_wheels:
                 employee_hours[uid]["wheels"][d] = employee_hours[uid]["wheels"].get(d, 0) + job_wheels
                 employee_hours[uid]["mobile"][d] = employee_hours[uid]["mobile"].get(d, 0) + mob
                 employee_hours[uid]["reman"][d]  = employee_hours[uid]["reman"].get(d, 0)  + rem
@@ -737,16 +758,17 @@ class Handler(BaseHTTPRequestHandler):
                 samples = []
                 for job in batch:
                     samples.append({
-                        "top_level_keys":  sorted(job.keys()),
-                        "status":          get_job_status(job),
-                        "date":            get_job_date(job),
-                        "assigned_uids":   list(get_job_assigned_uids(job)),
-                        "products":        job.get("products"),
-                        "line_items":      job.get("line_items"),
-                        "invoice":         job.get("invoice"),
-                        "current_status":  job.get("current_status"),
-                        "job_category":    job.get("job_category"),
-                        "custom_fields":   job.get("custom_fields"),
+                        "top_level_keys":      sorted(job.keys()),
+                        "status_resolved":     get_job_status(job),
+                        "date":                get_job_date(job),
+                        "assigned_uids":       list(get_job_assigned_uids(job)),
+                        "assigned_to_raw":     job.get("assigned_to"),
+                        "current_job_status":  job.get("current_job_status"),
+                        "job_status":          job.get("job_status"),
+                        "current_status":      job.get("current_status"),
+                        "products":            job.get("products"),
+                        "job_category":        job.get("job_category"),
+                        "wheels_counted":      sum(count_wheels_from_products(job.get("products") or [])),
                     })
                 self.send_json({"count": len(batch), "jobs": samples})
             except Exception as e:
